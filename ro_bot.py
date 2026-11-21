@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.1.2"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.1.3"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -3498,10 +3498,11 @@ def run(cfg):
                 if zoom_at and now >= zoom_at:
                     zoom_at = 0
                     zn = int(mcfg.get("zoom_out", 10) or 0)
-                    if zn > 0:
-                        log(f"拉大視野（滾輪往上 {zn} 格）")
+                    if zn != 0:
+                        log(f"拉大視野（滾輪 {zn} 格）")
                         MOVER.set(None, False)
-                        inp.scroll(ox + W * 0.75, oy + H * 0.45, -zn, "拉大視野")
+                        # 方向設定：zoom_out 正數 = 拉大視野（若遊戲改版方向相反，改成負數即可）
+                        inp.scroll(ox + W * 0.75, oy + H * 0.45, zn, "拉大視野")
                         park_mouse(rect)
                         continue
                 # 誤點技能欄跳出的說明框 → 關掉
