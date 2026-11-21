@@ -342,9 +342,11 @@ class App:
                                                                                 padx=2)
         ttk.Label(f3, text="場自動停止（0 = 不限）").grid(row=3, column=2, columnspan=3, sticky="w")
 
-        # 工具列
+        compact = not self.cfg.get("ui", {}).get("show_all", False)
+        # 工具列（精簡介面時隱藏；設定改成關閉視窗和按「開始」時自動儲存）
         tools = ttk.Frame(self.root)
-        tools.pack(fill="x", **pad)
+        if not compact:
+            tools.pack(fill="x", **pad)
         ttk.Button(tools, text="儲存設定", command=self.save_cfg).pack(side="left", padx=4)
         ttk.Button(tools, text="進階設定檔…", command=self.open_cfg).pack(side="left", padx=4)
         ttk.Button(tools, text="開啟紀錄資料夾", command=self.open_logs).pack(side="left", padx=4)
@@ -353,7 +355,8 @@ class App:
 
         # 紀錄
         lf = ttk.LabelFrame(self.root, text="執行紀錄")
-        lf.pack(fill="both", expand=True, **pad)
+        if not compact:     # 精簡介面不顯示，但紀錄照樣寫到 logs 資料夾
+            lf.pack(fill="both", expand=True, **pad)
         self.txt = tk.Text(lf, height=16, wrap="word", font=("Consolas", 10),
                            bg="#1e1e1e", fg="#d4d4d4", insertbackground="#fff", relief="flat")
         sb = ttk.Scrollbar(lf, command=self.txt.yview)
@@ -362,6 +365,14 @@ class App:
         self.txt.pack(side="left", fill="both", expand=True)
         self.txt.tag_configure("err", foreground="#f48771")
         self.txt.tag_configure("act", foreground="#9cdcfe")
+        if compact:
+            self.root.minsize(560, 300)
+            self.root.update_idletasks()
+            bottom = max(w.winfo_y() + w.winfo_height() for w in self.root.winfo_children()
+                         if w.winfo_manager())
+            self.root.geometry(f"680x{max(bottom, self.root.winfo_reqheight()) + 8}")
+            self.root.after(50, lambda: self.root.geometry(
+                f"680x{max(w.winfo_y() + w.winfo_height() for w in self.root.winfo_children() if w.winfo_manager()) + 8}"))
 
     def fill_from_cfg(self):
         c = self.cfg
@@ -639,6 +650,10 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def on_close(self):
+        try:
+            self.save_cfg(quiet=True)
+        except Exception:
+            pass
         if self.thread and self.thread.is_alive():
             rb.CONTROL["stop"] = True
             self.thread.join(timeout=3)
