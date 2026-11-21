@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.1.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.1.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -221,7 +221,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 12,
+    "config_version": 13,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -344,10 +344,10 @@ DEFAULT_CONFIG = {
         "stop_after_games": 0,
     },
     "hud_ignore": [
-        [0.00, 0.00, 0.28, 0.11],
-        [0.40, 0.00, 0.60, 0.15],
-        [0.69, 0.00, 1.00, 0.23],
-        [0.38, 0.85, 0.62, 1.00],
+        [0.00, 0.00, 0.36, 0.17],
+        [0.37, 0.00, 0.63, 0.15],
+        [0.80, 0.00, 1.00, 0.31],
+        [0.34, 0.82, 0.66, 1.00],
     ],
     "coord_region": [0.84, 0.00, 1.00, 0.07],
     "menu_ocr_scale": 1.0,
@@ -394,7 +394,12 @@ def migrate_config(cfg, ver=None):
     if ver < 11:  # 主力以外的技能預設全部勾放逐（使用者自己改過的就不動）
         if cfg["levelup"].get("banish", []) in ([], ["攻擊：屬性附加"]):
             cfg["levelup"]["banish"] = ["聖靈召喚", "心靈爆破", "火焰之壁", "冰凍術", "火狩", "雷爆術", "攻擊：屬性附加"]
-    cfg["config_version"] = 12
+    if ver < 13:  # 遊戲介面變大，戰鬥畫面要忽略的 HUD 範圍跟著放大
+        if cfg.get("hud_ignore") == [[0.00, 0.00, 0.28, 0.11], [0.40, 0.00, 0.60, 0.15],
+                                     [0.69, 0.00, 1.00, 0.23], [0.38, 0.85, 0.62, 1.00]]:
+            cfg["hud_ignore"] = [[0.00, 0.00, 0.36, 0.17], [0.37, 0.00, 0.63, 0.15],
+                                 [0.80, 0.00, 1.00, 0.31], [0.34, 0.82, 0.66, 1.00]]
+    cfg["config_version"] = 13
     return cfg
 
 
@@ -1584,6 +1589,9 @@ class OcrWatcher(threading.Thread):
                            "timer": read_timer(items), "t": time.time()}
                     if in_game(items):
                         upd["ingame_t"] = upd["t"]
+                    # 頭目機制：「躲到鐘下！」
+                    if any("钟下" in i["n"] or "躲到" in i["n"] for i in items):
+                        upd["bell_t"] = upd["t"]
                     now = time.time()
                     if now >= self.__dict__.get("lv_next", 0):
                         self.lv_next = now + 1.5
@@ -1755,6 +1763,31 @@ def pick_card(card, cards, items, inp, use_keys=True):
                       label=f"按 {idx}：{t['text']}")
         return
     inp.click_item(card["title"])
+
+
+def find_bell(frame):
+    """斐揚洞穴頭目機制的金色大鐘：回傳鐘中心（畫面座標）或 None"""
+    H, W = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    m = ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 28) & (hsv[:, :, 1] >= 70)
+         & (hsv[:, :, 2] >= 90)).astype(np.uint8)
+    m[:int(H * 0.16), :] = 0                                   # 上方 HUD
+    m[:int(H * 0.35), int(W * 0.8):] = 0                       # 右上小地圖
+    m[int(H * 0.86):, int(W * 0.33):int(W * 0.67)] = 0         # 下方技能欄
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    n, _, st, _ = cv2.connectedComponentsWithStats(m)
+    best = None
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if a < 6000 or not (0.5 < w / max(h, 1) < 2.0) or a < 0.35 * w * h:
+            continue
+        if best is None or a > best[4]:
+            best = (x, y, w, h, a)
+    if best is None:
+        return None
+    x, y, w, h, _ = best
+    return (x + w / 2, y + h * 0.6)
 
 
 def skill_panel_open(frame):
@@ -3425,6 +3458,23 @@ def run(cfg):
                         continue
                 lc = (W / 2 + mcfg["character_offset"][0], H / 2 + mcfg["character_offset"][1])
                 center = (ox + lc[0], oy + lc[1])
+                # 頭目機制「躲到鐘下！」：走到鐘底下，到了就站著不動
+                if now - res.get("bell_t", 0) < 3.0:
+                    bell = find_bell(frame)
+                    if bell is not None:
+                        bdx, bdy = bell[0] - lc[0], bell[1] - lc[1]
+                        bd = math.hypot(bdx, bdy)
+                        if not GAME.get("bell_logged"):
+                            log("頭目機制：躲到鐘下！→ 走到鐘底下")
+                            GAME["bell_logged"] = True
+                        if bd > 28:
+                            MOVER.set((bdx / bd, bdy / bd), True, center)
+                        else:
+                            MOVER.set(None, False)
+                        time.sleep(0.05)
+                        continue
+                elif GAME.get("bell_logged"):
+                    GAME["bell_logged"] = False
                 coins, ores, chests = vision.detect(frame)
                 water = vision.last_water
 
