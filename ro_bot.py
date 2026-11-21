@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.3.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.3.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -466,6 +466,7 @@ _PAIRS = (
 )
 _PAIRS += " 離离 沒没 欄栏 著着 帳帐 號号 刪删 線线 暫暂 擇择 項项 歡欢 迎迎"
 _PAIRS += " 陽阳 揚扬 楊杨 輪轮 亞亚 嵐岚"   # 地圖名稱（小地圖標題）
+_PAIRS += " 鐘钟 躱躲"                       # 頭目機制「躲到鐘下！」
 T2S = {}
 for _p in _PAIRS.split():
     if _p[0] != _p[1]:
@@ -1670,7 +1671,7 @@ class OcrWatcher(threading.Thread):
                     if in_game(items):
                         upd["ingame_t"] = upd["t"]
                     # 頭目機制：「躲到鐘下！」
-                    if any("钟下" in i["n"] or "躲到" in i["n"] for i in items):
+                    if any(k in i["n"] for i in items for k in ("钟下", "躲到", "到钟")):
                         upd["bell_t"] = upd["t"]
                     now = time.time()
                     if now >= self.__dict__.get("lv_next", 0):
@@ -1865,7 +1866,14 @@ def pick_card(card, cards, items, inp, use_keys=True):
 
 
 def find_bell(frame):
-    """斐揚洞穴頭目機制的金色大鐘：回傳鐘中心（畫面座標）或 None"""
+    """斐揚洞穴頭目機制的金色大鐘：回傳最大那個鐘的位置（畫面座標）或 None"""
+    b = find_bells(frame)
+    return max(b, key=lambda c: c[2])[:2] if b else None
+
+
+def find_bells(frame, relaxed=False):
+    """畫面上所有的金色大鐘：[(x, y, 面積), ...]。
+    relaxed：「躲到鐘下」期間用，比較小、或一半在畫面外的鐘也算"""
     H, W = frame.shape[:2]
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     m = ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 28) & (hsv[:, :, 1] >= 70)
@@ -1876,19 +1884,81 @@ def find_bell(frame):
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     n, _, st, _ = cv2.connectedComponentsWithStats(m)
-    best = None
+    out = []
     for i in range(1, n):
         x, y, w, h, a = st[i]
-        if a < 9000 or not (0.5 < w / max(h, 1) < 2.0) or a < 0.35 * w * h:
-            continue
+        edge = x <= 2 or x + w >= W - 2 or y + h >= H - 2 or y <= int(H * 0.16) + 2
         if w > W * 0.35 or h > H * 0.45:          # 整片沙地、木頭地板不是鐘
             continue
-        if best is None or a > best[4]:
-            best = (x, y, w, h, a)
-    if best is None:
+        if a >= 9000 and 0.5 < w / max(h, 1) < 2.0 and a >= 0.35 * w * h:
+            pass
+        elif relaxed and a >= 3500 and 0.4 < w / max(h, 1) < 2.5 and a >= 0.3 * w * h:
+            pass                                  # 比較小（離比較遠／被擋住一部分）
+        elif relaxed and edge and a >= 2000:
+            pass                                  # 一半在畫面外
+        else:
+            continue
+        out.append((x + w / 2, y + h * 0.6, a))
+    return out
+
+
+BELL_EP_SEC = 15     # 每次「躲到鐘下！」最多花幾秒找鐘、站在鐘底下
+
+
+def bell_step(frame, lc, world, now, banner, hold_on):
+    """頭目機制「躲到鐘下！」。回傳 ("move", 方向)／("stay", None)／None（現在不用躲鐘）
+    - 讀到提示字 → 開始一次躲鐘（最多 15 秒）：一直找鐘、走過去、站在鐘底下（提示字消失也繼續）
+    - 第二次躲鐘時，先去還沒站過的鐘（第一個鐘可能還留在畫面上）
+    - 等頭目時看到新的鐘也會去（提示字沒讀到也不會漏掉）"""
+    ep = GAME.get("bell_ep")
+    done = GAME.setdefault("bells_done", [])
+    wx, wy = world
+    if GAME.get("ending_logged"):
+        return None                                   # 頭目死了、最後倒數：不用再躲
+    if ep is not None and now > ep["until"]:
+        if not ep["reached"]:
+            log(f"第 {ep['n']} 次躲鐘結束，沒有走到鐘底下")
+        ep = GAME["bell_ep"] = None
+    start = None
+    if ep is None:
+        if banner:
+            start = "看到提示字"
+        elif hold_on and GAME.get("bell_count", 0) >= 1:
+            cw = [(bx - lc[0] + wx, by - lc[1] + wy) for bx, by, _ in find_bells(frame)]
+            if any(all(math.hypot(c[0] - d[0], c[1] - d[1]) > 150 for d in done) for c in cw):
+                start = "看到新的鐘"
+    if start:
+        n = GAME["bell_count"] = GAME.get("bell_count", 0) + 1
+        ep = GAME["bell_ep"] = {"n": n, "start": now, "until": now + BELL_EP_SEC, "target": None,
+                                "seen_t": 0.0, "reached": False, "missing": False}
+        log(f"頭目機制：第 {n} 次躲到鐘下（{start}）→ 找鐘、走到鐘底下")
+        save_image(frame, f"bell{n}")
+    if ep is None:
         return None
-    x, y, w, h, _ = best
-    return (x + w / 2, y + h * 0.6)
+    cw = [(bx - lc[0] + wx, by - lc[1] + wy) for bx, by, _ in find_bells(frame, relaxed=True)]
+    fresh = [c for c in cw if all(math.hypot(c[0] - d[0], c[1] - d[1]) > 150 for d in done)]
+    pool = fresh or (cw if now - ep["start"] > 4 else [])   # 只看到站過的鐘：等 4 秒再回那個鐘
+    if pool:
+        cur = ep["target"]
+        same = [c for c in pool if cur is not None and math.hypot(c[0] - cur[0], c[1] - cur[1]) < 100]
+        ep["target"] = same[0] if same else min(pool, key=lambda c: math.hypot(c[0] - wx, c[1] - wy))
+        ep["seen_t"] = now
+    tgt = ep["target"] if ep["target"] is not None and now - ep["seen_t"] < 6 else None
+    if tgt is None:
+        if now - ep["start"] > 2 and not ep["missing"]:
+            ep["missing"] = True
+            log(f"第 {ep['n']} 次躲鐘：畫面上找不到鐘（畫面存在 logs 的 bell_missing_*.jpg）")
+            save_image(frame, "bell_missing")
+        return ("stay", None)
+    dx, dy = tgt[0] - wx, tgt[1] - wy
+    dist = math.hypot(dx, dy)
+    if dist > 28:
+        return ("move", (dx / dist, dy / dist), dist)
+    if not ep["reached"]:
+        ep["reached"] = True
+        done.append(tgt)
+        log(f"第 {ep['n']} 次躲鐘：已經站到鐘底下")
+    return ("stay", None)
 
 
 def skill_panel_open(frame):
@@ -2396,7 +2466,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
         click(btn, tc["field_button"])
         GAME["phase"], GAME["battle_seen"] = "battle", time.time()
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
-                    maxlv_logged=False, hold_logged=False, bell_logged=False)
+                    maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0)
         log("進入戰鬥")
         return "acted"
 
@@ -3565,6 +3635,7 @@ def run(cfg):
                     last_coord, coord_same_since = None, now
                     bumps = 0
                     battle_t0 = now
+                    GAME.update(bell_ep=None, bells_done=[], bell_count=0)
                     with watcher.lock:              # 上一場的地圖名稱不要帶到這一場
                         watcher.res.pop("map_name", None)
                         watcher.last_map = None
@@ -3669,39 +3740,7 @@ def run(cfg):
                         continue
                 lc = (W / 2 + mcfg["character_offset"][0], H / 2 + mcfg["character_offset"][1])
                 center = (ox + lc[0], oy + lc[1])
-                # 頭目機制「躲到鐘下！」：走到鐘底下，到了就站著不動
-                if now - res.get("bell_t", 0) < 3.0:
-                    bell = find_bell(frame)
-                    if bell is not None:
-                        bdx, bdy = bell[0] - lc[0], bell[1] - lc[1]
-                        bd = math.hypot(bdx, bdy)
-                        if not GAME.get("bell_logged"):
-                            log("頭目機制：躲到鐘下！→ 走到鐘底下")
-                            GAME["bell_logged"] = True
-                        if bd > 28:
-                            MOVER.set((bdx / bd, bdy / bd), True, center)
-                        else:
-                            MOVER.set(None, False)
-                        time.sleep(0.05)
-                        continue
-                elif GAME.get("bell_logged"):
-                    GAME["bell_logged"] = False
-                # 頭目快出現（例如斐揚洞穴 13:40 之後）：停在原地，等鐘出現再躲；頭目死後倒數也不動
-                tcf = cfg["town"]
-                hold = (tcf.get("boss_hold") or {}).get(tcf.get("stage")) \
-                    if tcf.get("mode") == "expedition" else None
-                if hold and GAME.get("max_timer", 0) >= int(hold):
-                    if not GAME.get("hold_logged"):
-                        m_, s_ = divmod(int(hold), 60)
-                        log(f"計時過了 {m_}:{s_:02d}，頭目快出現 → 停在原地，只在要躲鐘時移動")
-                        GAME["hold_logged"] = True
-                    MOVER.set(None, False)
-                    time.sleep(0.1)
-                    continue
-                coins, ores, chests = vision.detect(frame)
-                water = vision.last_water
-
-                # 鏡頭位移 → 角色在地圖上的位置（用來記住撞過的地方）
+                # 鏡頭位移 → 角色在地圖上的位置（用來記住撞過的地方、鐘的位置）
                 moved = None
                 if bst.get("prev") is not None and bst["prev"].shape == frame.shape:
                     sdx, sdy, sresp = cam_shift(bst["prev"], frame)
@@ -3714,8 +3753,35 @@ def run(cfg):
                 if mmap:
                     mmap.update(frame, now, bst["world"], res.get("map_name"))
                     mm_ok = not dry and mmap.ready(now)
-                    if mm_ok:
-                        mmap.add_items(coins + ores + chests, lc, now)
+                # 頭目快出現（例如斐揚洞穴 13:40 之後）：停在原地，等鐘出現再躲；頭目死後倒數也不動
+                tcf = cfg["town"]
+                hold = (tcf.get("boss_hold") or {}).get(tcf.get("stage")) \
+                    if tcf.get("mode") == "expedition" else None
+                hold_on = bool(hold and GAME.get("max_timer", 0) >= int(hold))
+                # 頭目機制「躲到鐘下！」：找鐘、走到鐘底下，到了就站著不動
+                bs = bell_step(frame, lc, bst["world"], now, now - res.get("bell_t", 0) < 3.0, hold_on)
+                if bs is not None:
+                    if bs[0] == "move":
+                        bd_ = bs[1]
+                        if mm_ok:       # 小地圖：路上有石頭、水就繞一下
+                            bd_ = mmap.steer(bd_, need=bs[2] / (mmap.scale or _mmod.DEFAULT_SCALE))
+                        MOVER.set(bd_, True, center)
+                    else:
+                        MOVER.set(None, False)
+                    time.sleep(0.05)
+                    continue
+                if hold_on:
+                    if not GAME.get("hold_logged"):
+                        m_, s_ = divmod(int(hold), 60)
+                        log(f"計時過了 {m_}:{s_:02d}，頭目快出現 → 停在原地，只在要躲鐘時移動")
+                        GAME["hold_logged"] = True
+                    MOVER.set(None, False)
+                    time.sleep(0.1)
+                    continue
+                coins, ores, chests = vision.detect(frame)
+                water = vision.last_water
+                if mm_ok:
+                    mmap.add_items(coins + ores + chests, lc, now)
                 bst["blocked"] = [b for b in bst["blocked"] if now - b[2] < 40]
                 bst["avoid"] = [a for a in bst["avoid"] if now - a[2] < 20]
                 blocked_scr = [(bx - wx + lc[0], by - wy + lc[1]) for bx, by, _ in bst["blocked"]]
