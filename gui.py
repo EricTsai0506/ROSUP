@@ -1,5 +1,5 @@
 """
-RO Survivors 自動輔助 — 視窗版
+掛機小幫手 — 視窗版（支援 RO Survivors 網頁版）
 """
 import json
 import os
@@ -14,7 +14,7 @@ from tkinter import ttk, messagebox
 import ro_bot as rb
 import updater
 
-APP_TITLE = "RO Survivors 自動輔助"
+APP_TITLE = "掛機小幫手"
 CHEST_EFFECT = dict(getattr(rb, "CHEST_ITEMS", []))
 CHEST_CAT = dict(getattr(rb, "CHEST_CATEGORY", {}))
 SKILLS = ["火箭術", "冰箭術", "雷擊術", "聖靈召喚", "心靈爆破",
