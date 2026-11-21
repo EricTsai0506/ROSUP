@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.0.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.0.2"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -1167,7 +1167,7 @@ class Input:
         IO.mouse_down()
         time.sleep(random.uniform(0.05, 0.13))
         IO.mouse_up()
-        ACTION.update(kind="click", x=tx, y=ty, label=label or item["text"])
+        ACTION.update(kind="click", x=tx, y=ty, label=label or item["text"], t=time.time())
         return tx, ty
 
     def press(self, key):
@@ -1700,6 +1700,67 @@ def pick_card(card, cards, items, inp, use_keys=True):
     inp.click_item(card["title"])
 
 
+def skill_panel_open(frame):
+    """戰鬥中誤點技能欄跳出的技能說明框（左邊一大塊白色＋上方藍色標題列）"""
+    H, W = frame.shape[:2]
+    x0, x1 = int(W * 0.03), int(W * 0.45)
+    hsv = cv2.cvtColor(frame[:, x0:x1], cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 1] < 45) & (hsv[:, :, 2] > 215)).mean(axis=1)
+    top = hsv[: int(H * 0.15)]
+    blue = ((top[:, :, 0] >= 95) & (top[:, :, 0] <= 130) & (top[:, :, 1] > 60)
+            & (top[:, :, 2] > 120)).mean(axis=1)
+    return (white > 0.6).mean() > 0.75 and int((blue > 0.6).sum()) >= 25
+
+
+def park_mouse(rect):
+    """把滑鼠移到畫面中間偏上的空地，不要停在下方技能欄上"""
+    if CONTROL.get("dry"):
+        return
+    x = rect[0] + rect[2] * random.uniform(0.55, 0.7)
+    y = rect[1] + rect[3] * random.uniform(0.3, 0.4)
+    try:
+        human_move(x, y, target_w=80)
+    except Exception:
+        pass
+
+
+def close_skill_panel(rect, inp):
+    """關掉技能說明框：先再點一次剛才誤點的位置，不行再點畫面空地"""
+    last = dict(ACTION)
+    if last.get("kind") == "click" and time.time() - last.get("t", 0) < 120 \
+            and last.get("y", 0) > rect[1] + rect[3] * 0.75:
+        log(f"誤點到技能欄，跳出技能說明 → 再點一次同一個位置關掉（{last['x']},{last['y']}）")
+        inp.click_item({"text": "技能欄", "x": last["x"] - 3, "y": last["y"] - 3, "w": 6, "h": 6})
+    else:
+        log("畫面被技能說明框擋住 → 點畫面空地關掉")
+        x = rect[0] + rect[2] * 0.8
+        y = rect[1] + rect[3] * 0.5
+        inp.click_item({"text": "空地", "x": x - 5, "y": y - 5, "w": 10, "h": 10})
+    ACTION["t"] = 0     # 下次不要再點同一個位置
+    park_mouse(rect)
+
+
+def menu_still_there(st, item, words=("自动", "重抽")):
+    """點按鈕前用最新畫面確認選單還在（遊戲可能已經自己選完關掉了）"""
+    sct, rect = st.get("sct"), st.get("rect")
+    if rect is None:
+        return True
+    try:
+        fr = grab(sct, rect)
+    except Exception:
+        return True
+    ox, oy = rect[0], rect[1]
+    H, W = fr.shape[:2]
+    x0 = max(0, int(item["x"] - ox - item["w"] * 3))
+    x1 = min(W, int(item["x"] - ox + item["w"] * 4))
+    y0 = max(0, int(item["y"] - oy - item["h"] * 2))
+    y1 = min(H, int(item["y"] - oy + item["h"] * 3))
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return True
+    its = ocr(fr[y0:y1, x0:x1], ox + x0, oy + y0, scale=1.5, min_score=0.3)
+    return any(w in i["n"] for i in its for w in words)
+
+
 def find_auto_button(items, frame, ox, oy):
     """遊戲的「自動」選技能按鈕（在「重抽全部」右邊）"""
     btn = next((i for i in items if i["n"] == "自动"), None)
@@ -1785,6 +1846,9 @@ def handle_levelup(cards, items, sec, inp, st):
     if sec.get("auto_after_banish", True) and GAME.get("fourth_banished") \
             and (GAME.get("attack_banished") or not need_attack):
         btn = find_auto_button(items, st.get("frame"), st.get("ox", 0), st.get("oy", 0))
+        if btn and not menu_still_there(st, btn):
+            log("  升級選單已經關掉了（遊戲自動選好了）→ 不點，避免點到技能欄")
+            return True
         if btn:
             if not GAME.get("auto_logged"):
                 log("  攻擊：屬性附加 和 第四技能 都放逐過了 → 之後改按「自動」選技能")
@@ -2661,6 +2725,7 @@ def process_menus(kind, sct, rect, cfg, inp, st, dry):
     MOVER.set(None, False)
     time.sleep(0.1)
     st["first"] = True
+    st["sct"], st["rect"] = sct, rect
     misses = 0
     for _ in range(3 if dry else 40):
         st["acted"], st["frame"], st["regions"] = False, None, None
@@ -2771,6 +2836,7 @@ def wait_screen_change(sct, rect, before, timeout=2.5, regions=None):
 def run(cfg):
     global MOVER
     dry = cfg["dry_run"]
+    CONTROL["dry"] = dry
     inp = Input(dry)
     log("模式：" + ("測試（只記錄、不操作）" if dry else "正式執行"))
     log("F8 暫停／繼續，F9 結束" + ("" if cfg.get("browser", {}).get("mode") == "cdp"
@@ -2863,6 +2929,7 @@ def run(cfg):
     bst = {"prev": None, "world": (0.0, 0.0), "blocked": [], "avoid": [], "hist": [],
            "path_next": 0, "path_tgt": None, "path_dir": None}
     vp_next = 0
+    panel_next = 0
     win_next = time.time() + 10
 
     try:
@@ -2934,6 +3001,8 @@ def run(cfg):
                 if res["kind"] and res["t"] > menu_done_t:
                     if cfg[res["kind"]]["enabled"]:
                         process_menus(res["kind"], sct, rect, cfg, inp, menu_st, dry)
+                        if GAME.get("phase") == "battle":
+                            park_mouse(rect)  # 滑鼠不要停在技能欄上
                     menu_done_t = time.time()
                     if res["kind"] in ("result", "lobby", "afk", "login", "charselect"):
                         with watcher.lock:
@@ -2987,6 +3056,8 @@ def run(cfg):
                         if before_b is not None:
                             wait_screen_change(sct, rect, before_b)  # 等選單真的打開
                         process_menus("levelup", sct, rect, cfg, inp, menu_st, dry)
+                        if GAME.get("phase") == "battle":
+                            park_mouse(rect)  # 滑鼠不要停在技能欄上
                         menu_done_t = time.time()
                         continue
 
@@ -3059,6 +3130,14 @@ def run(cfg):
                 frame = grab(sct, rect)
                 H, W = frame.shape[:2]
                 ox, oy = rect[0], rect[1]
+                # 誤點技能欄跳出的說明框 → 關掉
+                if now >= panel_next:
+                    panel_next = now + 1.0
+                    if not dry and skill_panel_open(frame):
+                        MOVER.set(None, False)
+                        close_skill_panel(rect, inp)
+                        time.sleep(0.4)
+                        continue
                 lc = (W / 2 + mcfg["character_offset"][0], H / 2 + mcfg["character_offset"][1])
                 center = (ox + lc[0], oy + lc[1])
                 coins, ores, chests = vision.detect(frame)
