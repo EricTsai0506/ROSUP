@@ -110,10 +110,6 @@ class App:
             c[k]["enabled"] = loop
         c["debug_snapshots"] = self.v_snap.get()
         c["town"]["learn_route"] = self.v_route.get()
-        c.setdefault("update", dict(rb.DEFAULT_CONFIG["update"]))
-        c["update"]["repo"] = self.v_repo.get().strip()
-        c["update"]["check_on_start"] = self.v_upd_auto.get()
-        c["update"]["token"] = self.v_token.get().strip()
         for k in ("afk", "login", "charselect"):
             c.setdefault(k, dict(rb.DEFAULT_CONFIG[k]))["enabled"] = self.v_login.get()
         c["charselect"]["slot"] = int(self.v_slot.get())
@@ -213,18 +209,8 @@ class App:
                 row=2 + r_, column=c_, sticky="w", padx=(0, 8))
         uf = ttk.LabelFrame(f1, text=f"線上更新（目前版本 v{rb.VERSION}）", padding=6)
         uf.grid(row=len(checks) + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.v_repo = tk.StringVar()
-        self.v_upd_auto = tk.BooleanVar()
-        ttk.Label(uf, text="GitHub 儲存庫（帳號/名稱）").grid(row=0, column=0, sticky="w")
-        ttk.Entry(uf, textvariable=self.v_repo, width=28).grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).grid(
-            row=0, column=2, padx=4)
-        self.v_token = tk.StringVar()
-        ttk.Label(uf, text="存取金鑰（私人儲存庫才要）").grid(row=1, column=0, sticky="w")
-        ttk.Entry(uf, textvariable=self.v_token, width=28, show="•").grid(row=1, column=1, sticky="w",
-                                                                         padx=4)
-        ttk.Checkbutton(uf, text="開啟程式時自動檢查（有新版會先問你）",
-                        variable=self.v_upd_auto).grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).pack(
+            side="left")
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
@@ -378,9 +364,6 @@ class App:
         self.v_move.set(c["move"]["enabled"])
         self.v_loop.set(c["result"]["enabled"] and c["lobby"]["enabled"] and c["town"]["enabled"])
         self.v_route.set(c["town"].get("learn_route", True))
-        self.v_repo.set(c.get("update", {}).get("repo", ""))
-        self.v_upd_auto.set(c.get("update", {}).get("check_on_start", True))
-        self.v_token.set(c.get("update", {}).get("token", ""))
         self.v_login.set(c.get("login", {}).get("enabled", True))
         self.v_slot.set(int(c.get("charselect", {}).get("slot", 1)))
         self.v_snap.set(c.get("debug_snapshots", True))
@@ -579,14 +562,12 @@ class App:
     # ---------------- 線上更新 ----------------
     def check_update(self, quiet):
         """quiet=True：開程式時自動檢查，沒新版或出錯都不吵你"""
-        repo = self.v_repo.get().strip()
-        uc = self.cfg.get("update", {})
-        if quiet and (not repo or not self.v_upd_auto.get()):
+        uc = dict(rb.DEFAULT_CONFIG["update"])
+        uc.update(self.cfg.get("update", {}))
+        repo = (uc.get("repo") or "").strip() or rb.DEFAULT_CONFIG["update"]["repo"]
+        if quiet and not uc.get("check_on_start", True):
             return
-        if not repo:
-            messagebox.showinfo(APP_TITLE, "請先在「基本」頁填 GitHub 儲存庫（帳號/名稱）。")
-            return
-        token = self.v_token.get().strip() or uc.get("token", "")
+        token = uc.get("token", "")
         if not quiet:
             self.add_log("檢查更新中…")
 
