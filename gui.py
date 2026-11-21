@@ -112,6 +112,13 @@ class App:
             c[k]["enabled"] = loop
         c["debug_snapshots"] = self.v_snap.get()
         c["town"]["learn_route"] = self.v_route.get()
+        st_ = self.v_stage.get()
+        if st_.startswith("遠征："):
+            c["town"]["mode"], c["town"]["stage"] = "expedition", st_[len("遠征："):]
+        else:
+            c["town"]["mode"] = "festival"
+        c["town"]["difficulty"] = next((k for k, v in self.DIFF_CHOICES.items() if v == self.v_diff.get()),
+                                       "keep")
         for k in ("afk", "login", "charselect"):
             c.setdefault(k, dict(rb.DEFAULT_CONFIG[k]))["enabled"] = self.v_login.get()
         c["charselect"]["slot"] = int(self.v_slot.get())
@@ -218,7 +225,21 @@ class App:
         self.lic_label = ttk.Label(af, text="")
         self.lic_label.pack(side="left")
         ttk.Button(af, text="輸入序號", command=self.show_activate).pack(side="right")
-        keep = {lg, uf, mf, ef, af}   # 精簡介面時基本頁只留這幾區
+        sf = ttk.LabelFrame(f1, text="刷哪一關", padding=6)
+        sf.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.STAGE_CHOICES = ["節慶主持人（原本的關卡）"] + [f"遠征：{x}" for x in rb.EXPEDITION_STAGES]
+        self.DIFF_CHOICES = {"keep": "不調整（照遊戲目前的設定）", "min": "最簡單", "max": "最難"}
+        self.v_stage = tk.StringVar(value=self.STAGE_CHOICES[0])
+        self.v_diff = tk.StringVar(value=self.DIFF_CHOICES["keep"])
+        ttk.Label(sf, text="關卡").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(sf, textvariable=self.v_stage, values=self.STAGE_CHOICES, state="readonly",
+                     width=26).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(sf, text="難度").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(sf, textvariable=self.v_diff, values=list(self.DIFF_CHOICES.values()),
+                     state="readonly", width=26).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(sf, text="遠征會走到遠征隊長、選關、出發；難度在按「前往野外」前調整",
+                  foreground="#666").grid(row=2, column=0, columnspan=2, sticky="w")
+        keep = {lg, uf, mf, ef, af, sf}   # 精簡介面時基本頁只留這幾區
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
@@ -392,6 +413,11 @@ class App:
         self.v_move.set(c["move"]["enabled"])
         self.v_loop.set(c["result"]["enabled"] and c["lobby"]["enabled"] and c["town"]["enabled"])
         self.v_route.set(c["town"].get("learn_route", True))
+        if c["town"].get("mode") == "expedition":
+            self.v_stage.set("遠征：" + c["town"].get("stage", rb.EXPEDITION_STAGES[0]))
+        else:
+            self.v_stage.set(self.STAGE_CHOICES[0])
+        self.v_diff.set(self.DIFF_CHOICES.get(c["town"].get("difficulty", "keep"), self.DIFF_CHOICES["keep"]))
         self.v_login.set(c.get("login", {}).get("enabled", True))
         self.v_slot.set(int(c.get("charselect", {}).get("slot", 1)))
         self.v_snap.set(c.get("debug_snapshots", True))

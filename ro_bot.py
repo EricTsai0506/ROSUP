@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.0.8"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.0.9"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -265,6 +265,9 @@ DEFAULT_CONFIG = {
         "token": "",             # 私人儲存庫才需要（唯讀權限的 token）
         "check_on_start": True,
     },
+    "expedition": {
+        "enabled": True,
+    },
     "afk": {
         "enabled": True,
         "button": "接受",
@@ -293,6 +296,9 @@ DEFAULT_CONFIG = {
         "start_button_pos": [0.786, 0.743],
         "field_button": "前往野外",
         "learn_route": True,
+        "mode": "festival",          # festival = 節慶主持人（原本的關卡）；expedition = 遠征隊長
+        "stage": "普隆德拉原野",       # 遠征要刷的關卡
+        "difficulty": "keep",          # 出發前的難度：keep 不調整、min 最簡單、max 最難
     },
     "chest": {
         "enabled": True,
@@ -636,6 +642,9 @@ class ScreenIO:
     def mouse_up(self):
         pyautogui.mouseUp()
 
+    def wheel(self, x, y, notches):
+        pyautogui.scroll(-int(notches) * 120, x=x, y=y)
+
     def key_down(self, k):
         pyautogui.keyDown(k)
 
@@ -661,6 +670,9 @@ class CdpIO:
 
     def mouse_up(self):
         self.page.mouse_up()
+
+    def wheel(self, x, y, notches):
+        self.page.mouse_wheel(x, y, int(notches) * 100)
 
     def key_down(self, k):
         self.page.key_down(k)
@@ -802,6 +814,32 @@ BUTTONS = {"重抽", "专注", "放逐", "重抽全部", "新"}
 SLOT_RE = re.compile(r"^(技能|道具)\d{2,}$")
 
 
+EXPEDITION_STAGES = ["普隆德拉原野", "普隆德拉地下水道", "失事輪", "柏伊亞嵐島", "斐揚森林",
+                     "斐揚洞穴", "普隆德拉城"]
+
+
+def stage_of(text):
+    """OCR 讀到的字最像哪一個遠征關卡（不像就回傳 None）"""
+    import difflib
+    n = norm(text)
+    if len(n) < 2:
+        return None
+    best, score = None, 0.0
+    for st_ in EXPEDITION_STAGES:
+        r = difflib.SequenceMatcher(None, n, norm(st_)).ratio()
+        if r > score:
+            best, score = st_, r
+    return best if score >= 0.6 else None
+
+
+def is_expedition(items):
+    joined = " ".join(i["n"] for i in items)
+    n_pass = joined.count(norm("已通"))
+    n_mvp = sum(1 for i in items if i["n"].startswith("mvp"))
+    return any(k in joined for k in ("装备分", "装分", "备分", "分敷", "分数：")) or \
+        (n_pass >= 1 and n_mvp >= 1 and any(stage_of(i["text"]) for i in items))
+
+
 def detect_menu(items):
     """回傳 'lobby'、'result'、'levelup'、'chest' 或 None"""
     joined = " ".join(i["n"] for i in items)
@@ -811,6 +849,9 @@ def detect_menu(items):
     # 暫離彈窗（5 分鐘沒動作被請離）→ 接受
     if has("暫離", "沒有動作", "已離開遊戲", "即可回來") and any(match(i["text"], "接受") for i in items):
         return "afk"
+    # 遠征隊長的關卡選擇視窗
+    if is_expedition(items):
+        return "expedition"
     # 角色選擇（15 個欄位）
     n_slots = sum(1 for i in items if _is_empty_slot(i)
                   or ("baselv" in i["n"] and "joblv" in i["n"]))
@@ -1172,6 +1213,18 @@ class Input:
         IO.mouse_up()
         ACTION.update(kind="click", x=tx, y=ty, label=label or item["text"], t=time.time())
         return tx, ty
+
+    def scroll(self, x, y, notches, label=""):
+        """滾輪；notches > 0 往下捲"""
+        if self.dry:
+            log(f"  [測試模式] 會在 ({round(x)}, {round(y)}) 捲動 {notches} 格 {label}")
+            return
+        human_move(x, y, target_w=40)
+        time.sleep(random.uniform(0.08, 0.2))
+        step = 1 if notches > 0 else -1
+        for _ in range(abs(int(notches))):
+            IO.wheel(x, y, step)
+            time.sleep(random.uniform(0.05, 0.12))
 
     def press(self, key):
         if self.dry:
@@ -2069,6 +2122,15 @@ ROUTE_FILE = os.path.join(BASE_DIR, "town_route.json")
 _route = {"data": None, "loaded": False}
 
 
+def set_route_mode(mode):
+    """節慶主持人和遠征隊長各記各的路線"""
+    global ROUTE_FILE
+    f = os.path.join(BASE_DIR, "town_route.json" if mode != "expedition" else "town_route_expedition.json")
+    if f != ROUTE_FILE:
+        ROUTE_FILE = f
+        _route.update(data=None, loaded=False)
+
+
 def load_route():
     if not _route["loaded"]:
         _route["loaded"] = True
@@ -2135,10 +2197,11 @@ def route_failed():
 
 def clear_route():
     _route["data"], _route["loaded"] = None, True
-    try:
-        os.remove(ROUTE_FILE)
-    except OSError:
-        pass
+    for f in ("town_route.json", "town_route_expedition.json"):
+        try:
+            os.remove(os.path.join(BASE_DIR, f))
+        except OSError:
+            pass
 
 
 def town_reset(tst):
@@ -2157,9 +2220,15 @@ def town_ocr(frame, rect, cfg, inp, tst):
     H, W = frame.shape[:2]
     ox, oy = rect[0], rect[1]
     items = ocr(frame, ox, oy)
-    kw = norm(tc["npc_keyword"])
+    mode = tc.get("mode", "festival")
+    set_route_mode(mode)
+    if mode == "expedition":
+        kw, name = norm("隊長"), "遠征隊長"
+        kws = [norm(k) for k in ("隊長", "遠征", "征隊", "長交", "隧長", "际長")]
+    else:
+        kw, name = norm(tc["npc_keyword"]), tc.get("npc_name", "節慶主持人")
+        kws = [kw, norm("持人")]
     joined = " ".join(i["n"] for i in items)
-    name = tc.get("npc_name", "節慶主持人")
 
     def click(item, label):
         MOVER.set(None, False)
@@ -2169,12 +2238,24 @@ def town_ocr(frame, rect, cfg, inp, tst):
         tst["cooldown_until"] = time.time() + 3
         tst["target"] = None
 
-    if detect_menu(items) in ("lobby", "result", "afk", "login", "charselect"):
+    dm = detect_menu(items)
+    if dm == "expedition":
+        handle_expedition(frame, items, rect, cfg, inp)
+        tst["cooldown_until"] = time.time() + 0.5
+        return "acted"
+    if dm in ("lobby", "result", "afk", "login", "charselect"):
         return "other"
 
     # 「升級」視窗 → 前往野外
     btn = next((i for i in items if match(i["text"], tc["field_button"])), None)
     if btn:
+        # 難度視窗：先照設定調滑桿，下一輪再按前往野外
+        if tc.get("difficulty", "keep") in ("min", "max") and \
+                time.time() - tst.get("diff_set_t", 0) > 20 and find_sliders(frame, items, ox, oy):
+            tst["diff_set_t"] = time.time()
+            if set_difficulty(frame, items, rect, cfg, inp):
+                tst["cooldown_until"] = time.time() + 0.6
+                return "acted"
         click(btn, tc["field_button"])
         GAME["phase"], GAME["battle_seen"] = "battle", time.time()
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
@@ -2185,6 +2266,15 @@ def town_ocr(frame, rect, cfg, inp, tst):
     # 節慶活動視窗 → 開始遊戲（先用按鈕外觀找，再用文字，最後用固定位置）
     start_txt = next((i for i in items if match(i["text"], tc["start_button"])
                       and not match(i["text"], "開始遊戲！")), None)
+    if mode == "expedition" and ("扭蛋" in joined or "碎片" in joined or "收藏" in joined):
+        back = next((i for i in items if i["n"].startswith(norm("返回")) and len(i["n"]) <= 3), None)
+        log("跟節慶主持人對話了（目前設定是刷遠征）→ 按「返回」")
+        if back:
+            click(back, "返回")
+        else:
+            inp.press("escape")
+        tst["cooldown_until"] = time.time() + 1.5
+        return "acted"
     if "扭蛋" in joined or "碎片" in joined or "收藏" in joined or \
             (start_txt is not None and time.time() < tst.get("expect_start_until", 0)):
         box = find_button_by_image(frame, "start_button.png")
@@ -2222,6 +2312,19 @@ def town_ocr(frame, rect, cfg, inp, tst):
             any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白", "space"))
             or i["cy"] - oy > H * 0.8)
     prompt = [i for i in items if is_prompt(i)]
+    # 提示框的字常常讀不到，只讀到「空格」→ 放大那一小塊再讀一次，看是跟誰交談
+    if not prompt:
+        sp = next((i for i in items if i["n"] in ("空格", "空白") and i["cy"] - oy > H * 0.55
+                   and abs(i["cx"] - ox - W / 2) < W * 0.3), None)
+        if sp is not None:
+            x0 = int(max(0, sp["x"] - ox - 280))
+            y0 = int(max(0, sp["y"] - oy - 20))
+            x1 = int(min(W, sp["x"] - ox + sp["w"] + 10))
+            y1 = int(min(H, sp["y"] - oy + sp["h"] + 20))
+            zt = " ".join(i["n"] for i in ocr(frame[y0:y1, x0:x1], ox + x0, oy + y0, scale=1.5,
+                                              min_score=0.3))
+            if any(k in zt for k in kws) and not (mode == "expedition" and "持人" in zt):
+                prompt = [sp]
     if prompt and time.time() - tst.get("prompt_pending", 0) > 3:
         # 第一次看到提示：先停下來，馬上再讀一次確認還是主持人（旁邊的隊長等 NPC 也會跳提示）
         MOVER.set(None, False)
@@ -2244,9 +2347,17 @@ def town_ocr(frame, rect, cfg, inp, tst):
         return "acted"
 
     # 主持人頭上的名字：字數跟名字差不多（聊天訊息、提示句子那種長句不算）
-    labels = [i for i in items if kw in i["n"] and not is_prompt(i)
-              and len(i["n"]) <= len(norm(name)) + 3
-              and not any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白"))]
+    def label_ok(i):
+        return any(k in i["n"] for k in kws) and not is_prompt(i) \
+            and len(i["n"]) <= len(norm(name)) + 3 \
+            and not any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白"))
+    labels = [i for i in items if label_ok(i)]
+    if not labels and time.time() >= tst.get("zoom_next", 0):
+        # NPC 頭上的名字很小，讀不到時放大畫面中間再讀一次（每 2 秒最多一次）
+        tst["zoom_next"] = time.time() + 2
+        x0, y0, x1, y1 = int(W * .1), int(H * .08), int(W * .9), int(H * .78)
+        labels = [i for i in ocr(frame[y0:y1, x0:x1], ox + x0, oy + y0, scale=1.5, min_score=0.3)
+                  if label_ok(i)]
     if labels:
         lc = (W / 2, H / 2)
         lab = min(labels, key=lambda i: math.hypot(i["cx"] - ox - lc[0], i["cy"] - oy - lc[1]))
@@ -2505,6 +2616,9 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
     kind = now_kind
     rel = [dict(i, x=i["x"] - ox, y=i["y"] - oy) for i in items]
 
+    if kind == "expedition":
+        return handle_expedition(frame, items, rect, cfg, inp)
+
     if kind in ("afk", "login", "charselect"):
         return handle_login(kind, frame, items, rect, cfg, inp)
 
@@ -2675,6 +2789,141 @@ def char_slot_pos(items, frame, ox, oy, slot):
             bx, by = mk["cx"] + 85 * sc, mk["cy"]
         btn = {"text": "開始遊戲", "x": bx - 35 * sc, "y": by - 12 * sc, "w": 70 * sc, "h": 24 * sc}
     return (x, y), ("empty" if empty else btn)
+
+
+EXP = {}
+
+
+def find_sliders(frame, items, ox, oy):
+    """難度視窗：每一列百分比文字左邊的滑桿軌道（左端、右端、y），由上到下"""
+    H, W = frame.shape[:2]
+    out = []
+    for i in items:
+        t = i["text"].replace(" ", "")
+        if not (t.endswith("%") and t[:-1].isdigit()) or i["cx"] - ox < W * 0.5:
+            continue
+        y = int(i["cy"] - oy)
+        x0 = max(0, int(i["cx"] - ox - 420))
+        x1 = int(i["x"] - ox - 6)
+        if x1 - x0 < 80:
+            continue
+        row = frame[max(0, y - 1):y + 2, x0:x1].min(axis=2).min(axis=0) < 246
+        runs, st = [], None
+        for k, v in enumerate(row):
+            if v and st is None:
+                st = k
+            if not v and st is not None:
+                runs.append((st, k))
+                st = None
+        if st is not None:
+            runs.append((st, len(row)))
+        runs = [r for r in runs if r[1] - r[0] > 60]
+        if runs:
+            a, b = runs[-1]
+            out.append((ox + x0 + a, ox + x0 + b, oy + y, t))
+    return sorted(out, key=lambda r: r[2])
+
+
+def set_difficulty(frame, items, rect, cfg, inp):
+    """把難度滑桿全部拉到最左（最簡單）或最右（最難）"""
+    level = cfg["town"].get("difficulty", "keep")
+    if level not in ("min", "max"):
+        return False
+    sl = find_sliders(frame, items, rect[0], rect[1])
+    if not sl:
+        log("難度視窗：找不到滑桿，維持遊戲目前的難度")
+        return False
+    want = "最簡單" if level == "min" else "最難"
+    log(f"難度 → 全部調成{want}（目前：{'、'.join(r[3] for r in sl)}）")
+    MOVER.set(None, False)
+    for a, b, y, _ in sl:
+        x = a + 3 if level == "min" else b - 3
+        inp.click_item({"text": "難度滑桿", "x": x - 1, "y": y - 2, "w": 2, "h": 4}, "難度滑桿")
+        time.sleep(random.uniform(0.15, 0.35))
+    return True
+
+
+def handle_expedition(frame, items, rect, cfg, inp):
+    """遠征視窗：左邊選關卡 → 確認右邊大標題是那一關 → 按「出發」"""
+    tc = cfg["town"]
+    ox, oy = rect[0], rect[1]
+    H, W = frame.shape[:2]
+    MOVER.set(None, False)
+
+    def click(item, label):
+        time.sleep(random.uniform(0.4, 0.9))
+        log(f"遠征 → 按「{label}」")
+        inp.click_item(item, label)
+
+    close = next((i for i in items if match(i["text"], "關閉") and i["cy"] - oy > H * 0.8), None)
+    if tc.get("mode") != "expedition":
+        log("不小心打開了遠征視窗（目前設定是刷節慶主持人）→ 關閉")
+        EXP["closes"] = EXP.get("closes", 0) + 1 if time.time() - EXP.get("close_t", 0) < 20 else 1
+        EXP["close_t"] = time.time()
+        if close:
+            click(close, "關閉")
+        elif EXP["closes"] == 1:
+            inp.press("escape")
+        else:   # Esc 關不掉 → 點左下角「關閉」平常的位置
+            click({"text": "關閉", "x": ox + W * 0.06 - 30, "y": oy + H * 0.917 - 12, "w": 60, "h": 24},
+                  "關閉")
+        time.sleep(1.0)
+        return True
+
+    stage = tc.get("stage") or EXPEDITION_STAGES[0]
+    if time.time() - EXP.get("t", 0) > 60:          # 新的一次選關
+        EXP.clear()
+    EXP["t"] = time.time()
+    titles = [i for i in items if W * 0.36 < i["cx"] - ox < W * 0.8 and H * 0.25 < i["cy"] - oy < H * 0.42
+              and stage_of(i["text"])]
+    shown = stage_of(max(titles, key=lambda i: i["h"])["text"]) if titles else None
+    if shown == stage:
+        go = next((i for i in items if match(i["text"], "出發") and i["cy"] - oy > H * 0.8
+                   and i["cx"] - ox > W * 0.6), None)
+        if go is None:
+            big = ocr(frame[int(H * 0.85):, int(W * 0.6):], ox + int(W * 0.6), oy + int(H * 0.85),
+                      scale=1.5, min_score=0.3)
+            go = next((i for i in big if match(i["text"], "出發")), None)
+        if go is None:
+            if not EXP.get("nogo_logged"):
+                log(f"「{stage}」沒有「出發」按鈕（可能要先看劇情或還沒解鎖）→ 停止，請手動處理")
+                EXP["nogo_logged"] = True
+            CONTROL["stop"] = True
+            return True
+        click(go, "出發")
+        log(f"出發：{stage}（接著調難度、按前往野外）")
+        EXP.clear()
+        time.sleep(1.5)
+        return True
+
+    # 左邊清單找關卡名稱
+    left = [i for i in items if i["cx"] - ox < W * 0.36 and H * 0.12 < i["cy"] - oy < H * 0.9]
+    hit = next((i for i in left if stage_of(i["text"]) == stage), None)
+    if hit:
+        if EXP.get("clicked", 0) >= 4:
+            log(f"點了「{stage}」好幾次右邊都沒變 → 停止，請手動確認")
+            CONTROL["stop"] = True
+            return True
+        EXP["clicked"] = EXP.get("clicked", 0) + 1
+        click(hit, stage)
+        time.sleep(0.6)
+        return True
+    # 清單裡沒看到 → 捲動清單（先往下，捲到底再往上）
+    d = EXP.setdefault("dir", 1)
+    EXP["n"] = EXP.get("n", 0) + 1
+    if EXP["n"] > 5:
+        EXP["dir"], EXP["n"] = -d, 0
+        EXP["cycles"] = EXP.get("cycles", 0) + 1
+        if EXP["cycles"] >= 3:
+            log(f"遠征清單裡找不到「{stage}」→ 停止，請確認關卡名稱")
+            CONTROL["stop"] = True
+            return True
+    if not EXP.get("scroll_logged"):
+        log(f"清單裡還沒看到「{stage}」→ 捲動找找")
+        EXP["scroll_logged"] = True
+    inp.scroll(ox + W * 0.18, oy + H * 0.55, 3 * EXP["dir"], "遠征清單")
+    time.sleep(0.5)
+    return True
 
 
 def handle_login(kind, frame, items, rect, cfg, inp):

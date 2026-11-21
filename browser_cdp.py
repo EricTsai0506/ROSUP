@@ -298,6 +298,13 @@ class CdpPage:
         self.send_nowait("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": cx, "y": cy,
                                                       "buttons": buttons})
 
+    def mouse_wheel(self, x, y, dy):
+        """滾輪：dy > 0 往下捲（像素）"""
+        cx, cy = self._css(x, y)
+        self.mouse = (x, y)
+        self.send("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": cx, "y": cy,
+                                               "deltaX": 0, "deltaY": dy})
+
     def mouse_down(self, x=None, y=None):
         if x is None:
             x, y = self.mouse
