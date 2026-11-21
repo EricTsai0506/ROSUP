@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.1.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.1.2"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -299,6 +299,7 @@ DEFAULT_CONFIG = {
         "mode": "festival",          # festival = 節慶主持人（原本的關卡）；expedition = 遠征隊長
         "stage": "普隆德拉原野",       # 遠征要刷的關卡
         "difficulty": "keep",          # 出發前的難度：keep 不調整、min 最簡單、max 最難
+        "boss_hold": {"斐揚洞穴": 820},  # 遠征關卡：計時到幾秒後停在原地（只在躲鐘時移動）
     },
     "chest": {
         "enabled": True,
@@ -322,6 +323,8 @@ DEFAULT_CONFIG = {
         "ore_hsv_high": [135, 135, 225],
         "chest_threshold": 0.6,
         "chest_scales": [1.0],
+        "item_detector": "shape",    # shape = 用礦石形狀找（各地圖都適用）；color = 舊的顏色判斷
+        "ore_match": 0.7,
         "coin_hsv_low": [16, 70, 90],
         "coin_hsv_high": [34, 255, 255],
         "character_offset": [0, 0],
@@ -1359,6 +1362,16 @@ class Vision:
         self.ore_hi = np.array(m["ore_hsv_high"], np.uint8)
         self.th = m["chest_threshold"]
         self.scales = m["chest_scales"]
+        self.item_mode = m.get("item_detector", "shape")
+        self.ore_thr = float(m.get("ore_match", 0.7))
+        self.ore_tpl = None
+        try:
+            t = cv2.imread(os.path.join(TEMPLATE_DIR, "ore.png"), cv2.IMREAD_GRAYSCALE)
+            tm = cv2.imread(os.path.join(TEMPLATE_DIR, "ore_mask.png"), cv2.IMREAD_GRAYSCALE)
+            if t is not None and tm is not None:
+                self.ore_tpl = (t, tm)
+        except Exception:
+            pass
         self.hud = cfg["hud_ignore"]
         self.templates = []
         if os.path.isdir(TEMPLATE_DIR):
@@ -1403,6 +1416,43 @@ class Vision:
                 out[lab == i] = 1
         return out
 
+    def _items_by_shape(self, frame, hsv, mask):
+        """礦石：用形狀比對（灰階、只看礦石本體，不受地圖明暗和色調影響）；
+        金幣：黃色小圓，而且旁邊有礦石（金幣都跟礦石一起掉）或顏色非常明確"""
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        tpl, tmask = self.ore_tpl
+        r = cv2.matchTemplate(g, tpl, cv2.TM_CCOEFF_NORMED, mask=tmask)
+        r = np.nan_to_num(r, nan=0, posinf=0, neginf=0)
+        th, tw = tpl.shape
+        Hh, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        ores = []
+        ys, xs = np.where(r >= self.ore_thr)
+        for i in np.argsort(-r[ys, xs])[:400]:
+            px, py = xs[i] + tw / 2, ys[i] + th / 2
+            ix, iy = int(px), int(py)
+            if mask[iy, ix] == 0:
+                continue
+            if not (S[iy, ix] < 60 or 95 <= Hh[iy, ix] <= 150):     # 礦石不是鮮豔的暖色
+                continue
+            if all(abs(px - q[0]) > 7 or abs(py - q[1]) > 7 for q in ores):
+                ores.append((float(px), float(py)))
+        loc = cv2.blur(V, (31, 31)).astype(np.int32)
+        cm = ((Hh >= 15) & (Hh <= 35) & (S >= 80) & (V >= 55)
+              & (V.astype(np.int32) * 100 >= loc * 115)).astype(np.uint8)
+        cm[mask == 0] = 0
+        n, _, st, cen = cv2.connectedComponentsWithStats(cm)
+        coins = []
+        for i in range(1, n):
+            x, y, w_, h_, a = st[i]
+            if not (14 <= a <= 140 and w_ <= 15 and h_ <= 15 and 0.5 <= w_ / max(h_, 1) <= 2
+                    and a >= 0.45 * w_ * h_):
+                continue
+            cx, cy = cen[i]
+            strong = V[int(cy), int(cx)] >= 225 and S[int(cy), int(cx)] >= 105
+            if strong or any(abs(cx - q[0]) < 16 and abs(cy - q[1]) < 16 for q in ores):
+                coins.append((float(cx), float(cy)))
+        return coins, ores
+
     def detect(self, frame):
         h, w = frame.shape[:2]
         base = self._base_mask(h, w)
@@ -1413,12 +1463,14 @@ class Vision:
         glow = cv2.dilate(glow, np.ones((15, 15), np.uint8))
         mask = cv2.bitwise_and(base, cv2.bitwise_not(glow))
 
-        cm = cv2.inRange(hsv, self.coin_lo, self.coin_hi) & mask
-        cm = cv2.morphologyEx(cm, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-        coins = _blobs(cm, 25, 200, 18)
-
-        om = cv2.inRange(hsv, self.ore_lo, self.ore_hi) & mask
-        ores = _blobs(om, 8, 80, 14)
+        if self.ore_tpl is not None and self.item_mode == "shape":
+            coins, ores = self._items_by_shape(frame, hsv, base)   # 形狀比對不需要排除亮光
+        else:
+            cm = cv2.inRange(hsv, self.coin_lo, self.coin_hi) & mask
+            cm = cv2.morphologyEx(cm, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+            coins = _blobs(cm, 25, 200, 18)
+            om = cv2.inRange(hsv, self.ore_lo, self.ore_hi) & mask
+            ores = _blobs(om, 8, 80, 14)
 
         # 寶箱：先在縮小一半的畫面粗找，再用原尺寸確認（快很多）
         chests = []
@@ -1458,6 +1510,8 @@ class Vision:
 
         # 水池裡的東西撿不到，不追
         self.last_water = self.water_grid(frame, hsv)
+        if self.last_water.mean() > 0.2:      # 一大片藍色 = 地板本身是藍的（例如神殿），不是水池
+            self.last_water[:] = 0
         if self.last_water.any():
             wd = cv2.dilate(self.last_water, np.ones((3, 3), np.uint8))
             gh, gw = wd.shape
@@ -1780,7 +1834,9 @@ def find_bell(frame):
     best = None
     for i in range(1, n):
         x, y, w, h, a = st[i]
-        if a < 6000 or not (0.5 < w / max(h, 1) < 2.0) or a < 0.35 * w * h:
+        if a < 9000 or not (0.5 < w / max(h, 1) < 2.0) or a < 0.35 * w * h:
+            continue
+        if w > W * 0.35 or h > H * 0.45:          # 整片沙地、木頭地板不是鐘
             continue
         if best is None or a > best[4]:
             best = (x, y, w, h, a)
@@ -2293,7 +2349,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
         click(btn, tc["field_button"])
         GAME["phase"], GAME["battle_seen"] = "battle", time.time()
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
-                    maxlv_logged=False)
+                    maxlv_logged=False, hold_logged=False, bell_logged=False)
         log("進入戰鬥")
         return "acted"
 
@@ -3475,6 +3531,18 @@ def run(cfg):
                         continue
                 elif GAME.get("bell_logged"):
                     GAME["bell_logged"] = False
+                # 頭目快出現（例如斐揚洞穴 13:40 之後）：停在原地，等鐘出現再躲；頭目死後倒數也不動
+                tcf = cfg["town"]
+                hold = (tcf.get("boss_hold") or {}).get(tcf.get("stage")) \
+                    if tcf.get("mode") == "expedition" else None
+                if hold and GAME.get("max_timer", 0) >= int(hold):
+                    if not GAME.get("hold_logged"):
+                        m_, s_ = divmod(int(hold), 60)
+                        log(f"計時過了 {m_}:{s_:02d}，頭目快出現 → 停在原地，只在要躲鐘時移動")
+                        GAME["hold_logged"] = True
+                    MOVER.set(None, False)
+                    time.sleep(0.1)
+                    continue
                 coins, ores, chests = vision.detect(frame)
                 water = vision.last_water
 
