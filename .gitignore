@@ -9,3 +9,5 @@ license.key
 license.state
 private_key.pem
 issued.csv
+minimap/
+town_route_expedition.json

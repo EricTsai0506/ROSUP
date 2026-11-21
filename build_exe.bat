@@ -8,7 +8,7 @@ if errorlevel 1 goto fail
 
 echo [2/3] Building...
 python -m PyInstaller --noconfirm --clean --onedir --windowed --name RoBot ^
-  --collect-all rapidocr_onnxruntime --collect-binaries onnxruntime --hidden-import browser_cdp --hidden-import websocket --hidden-import updater --hidden-import licensing gui.py
+  --collect-all rapidocr_onnxruntime --collect-binaries onnxruntime --hidden-import browser_cdp --hidden-import websocket --hidden-import updater --hidden-import licensing --hidden-import minimap gui.py
 if errorlevel 1 goto fail
 
 echo [3/3] Copying files...

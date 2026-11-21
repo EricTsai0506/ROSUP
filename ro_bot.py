@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.1.4"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.2.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -329,6 +329,7 @@ DEFAULT_CONFIG = {
         "coin_hsv_high": [34, 255, 255],
         "character_offset": [0, 0],
         "stuck_check": True,
+        "minimap": True,             # 用右上角小地圖避開牆壁／水（會自己學每張地圖的地形）
     },
     "browser": {
         "mode": "cdp",
@@ -462,6 +463,7 @@ _PAIRS = (
     "陣阵 環环 廳厅 廰厅 來来 與与 節节 慶庆 欲欲 採采 驚惊 劑剂 秘秘 豐丰 睿睿 擲掷 倍倍 巧巧 運运 敏敏 捷捷 續续 毒毒 燒烧 血血 貪贪 爭争 處处 憶忆 壘垒 詭诡 計计 擊击 祇祇 張张 隕陨 牆墙 癒愈 鳴鸣 撃击 擎击 標标 卻却 屡属 貫贯 開开 遊游 戲戏 燈灯 籠笼 穫获 記记 錄录 寵宠 員员 遠远 徵征 單单 戰战 隊队 長长 談谈 噴喷 場场 廣广 線线 爐炉 燒烧 熱热 靜静 線线 鋒锋 銳锐 鐵铁 錘锤 槍枪 鬼鬼 衔术 循术 専专"
 )
 _PAIRS += " 離离 沒没 欄栏 著着 帳帐 號号 刪删 線线 暫暂 擇择 項项 歡欢 迎迎"
+_PAIRS += " 陽阳 揚扬 楊杨 輪轮 亞亚 嵐岚"   # 地圖名稱（小地圖標題）
 T2S = {}
 for _p in _PAIRS.split():
     if _p[0] != _p[1]:
@@ -839,6 +841,28 @@ def stage_of(text):
         if r > score:
             best, score = st_, r
     return best if score >= 0.6 else None
+
+
+MAP_NAMES = ["洛陽", "斐揚洞穴", "普隆德拉地下水道", "失事輪甲板", "普隆德拉原野", "柏伊亞嵐神殿",
+             "斐揚森林", "普隆德拉城"]
+
+
+def map_name_of(text):
+    """小地圖標題「斐揚洞穴 (168, 182)」→ 地圖名稱（讀不出來回傳 None）"""
+    import difflib
+    name = re.split(r"[(（\d]", text or "", maxsplit=1)[0]
+    name = re.sub(r"[\s,，.:：]", "", name)
+    n = norm(name)
+    if len(n) < 2:
+        return None
+    best, score = None, 0.0
+    for m_ in MAP_NAMES:
+        r = difflib.SequenceMatcher(None, n, norm(m_)).ratio()
+        if r > score:
+            best, score = m_, r
+    if score >= 0.6:
+        return best
+    return name if 2 <= len(name) <= 12 else None
 
 
 def is_expedition(items):
@@ -1663,6 +1687,10 @@ class OcrWatcher(threading.Thread):
                         if mm:
                             upd["coord"] = (int(mm.group(1)), int(mm.group(2)))
                             upd["coord_t"] = now
+                            nm = map_name_of(txt)
+                            if nm and nm == self.__dict__.get("last_map"):
+                                upd["map_name"] = nm
+                            self.last_map = nm
                     with self.lock:
                         self.res.update(upd)
                 except Exception as e:
@@ -1716,6 +1744,21 @@ def save_snapshot(frame, name, coins=(), chests=(), center=None, d=None, items=(
                       (0, 255, 0), 3)
     path = os.path.join(LOG_DIR, time.strftime(f"{name}_%H%M%S.jpg"))
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if ok:
+        buf.tofile(path)
+        _snap_files.append(path)
+    while len(_snap_files) > 40:
+        try:
+            os.remove(_snap_files.pop(0))
+        except Exception:
+            pass
+
+
+def save_image(img, name):
+    """把圖存到 logs（跟其他除錯截圖一起輪替，最多留 40 張）"""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    path = os.path.join(LOG_DIR, time.strftime(f"{name}_%H%M%S.jpg"))
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if ok:
         buf.tofile(path)
         _snap_files.append(path)
@@ -2252,11 +2295,12 @@ def save_route(tst, frame_shape):
             except Exception:
                 pass
         return
-    if cand["stuck"] > 0:     # 有卡住的路線不記
+    straight = math.hypot(npc[0], npc[1])
+    if length > straight * 1.6 + 150:     # 繞太遠的路線不記
         return
     if old and old.get("size") == cand["size"]:
-        better = (cand["stuck"] < old.get("stuck", 99)) or \
-                 (cand["stuck"] == old.get("stuck", 99) and length < old.get("len", 1e9) * 0.9)
+        better = length < old.get("len", 1e9) * 0.9 or \
+            (cand["stuck"] < old.get("stuck", 99) and length < old.get("len", 1e9) * 1.1)
         if not better:
             return
     try:
@@ -2298,7 +2342,8 @@ def town_reset(tst):
     """回到出生點（剛從大廳進城）：重設地圖座標"""
     for k in ("prev", "target", "route_on", "route_checked", "route_off", "npc_world", "npc_first",
               "route_on_success", "npc_w_reached",
-              "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir"):
+              "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir",
+              "path_w", "plan_t", "plan_tgt", "move_since", "last_dir"):
         tst.pop(k, None)
     tst.update(world=(0.0, 0.0), trail=[(0.0, 0.0)], fresh=True, stuck_total=0, stuck_n=0)
 
@@ -2397,10 +2442,16 @@ def town_ocr(frame, rect, cfg, inp, tst):
 
     # 畫面下方中間的交談提示（例如「與節慶主持人交談 空格」）
     # 用字的內容分辨，不只看位置（遊戲文字放大後提示框會變大、往上移）
+    hints = [j for j in items if j["n"] in ("空格", "空白") or "space" in j["n"]]
+
     def is_prompt(i):
-        return kw in i["n"] and i["cy"] - oy > H * 0.55 and abs(i["cx"] - ox - W / 2) < W * 0.3 and (
-            any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白", "space"))
-            or i["cy"] - oy > H * 0.8)
+        if not (kw in i["n"] and i["cy"] - oy > H * 0.55 and abs(i["cx"] - ox - W / 2) < W * 0.3):
+            return False
+        if any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白", "space")):
+            return True
+        # 只讀到名字：同一列右邊要有「空格」按鍵提示才是交談提示框
+        # （不然只是 NPC 剛好走到畫面下方，頭上的名字被當成提示 → 太遠按空白鍵沒反應）
+        return any(abs(j["cy"] - i["cy"]) < H * 0.035 and 0 < j["cx"] - i["cx"] < W * 0.35 for j in hints)
     prompt = [i for i in items if is_prompt(i)]
     # 提示框的字常常讀不到，只讀到「空格」→ 放大那一小塊再讀一次，看是跟誰交談
     if not prompt:
@@ -2434,6 +2485,8 @@ def town_ocr(frame, rect, cfg, inp, tst):
         tst["cooldown_until"] = time.time() + tc["talk_cooldown"]
         tst["expect_start_until"] = time.time() + 10
         tst["target"] = None
+        tst["last_dir"] = None          # 按完空白鍵不要再往前走
+        tst["hist"], tst["move_since"] = [], None
         return "acted"
 
     # 主持人頭上的名字：字數跟名字差不多（聊天訊息、提示句子那種長句不算）
@@ -2486,6 +2539,50 @@ def town_ocr(frame, rect, cfg, inp, tst):
     return "town"
 
 
+def _town_stuck(tst, now, world, step_dir):
+    """城鎮卡住偵測：持續按著方向鍵 1.2 秒以上，畫面（地圖位置）卻幾乎沒動才算卡住。
+    停下來讀字、剛起步、畫面沒更新的時間都不算。卡住回傳要閃開的方向，不然回傳 None"""
+    hist = tst.get("hist") or []
+    ms = tst.get("move_since")
+    if ms is None or now - ms < 1.2 or len(hist) < 3 or now - hist[0][0] < 1.0:
+        return None
+    total = math.hypot(world[0] - hist[0][1][0], world[1] - hist[0][1][1])
+    if total > 40:
+        tst["stuck_n"] = 0
+    if total >= 12:
+        return None
+    if tst.get("route_on") and tst.get("route_stuck", 0) < 4:
+        # 照路線走時被邊角卡到：先試旁邊 45° 的方向，不急著放棄路線
+        k = tst.get("route_stuck", 0)
+        tst["route_stuck"] = k + 1
+        tst["detour"] = rotate(step_dir, 45 if k % 2 == 0 else -45)
+        tst["detour_until"] = now + 0.35 + 0.15 * k
+        tst["hist"] = []
+        return tst["detour"]
+    # 記住撞到的地方（角色前方一格），之後規劃路線會避開
+    bl = tst.setdefault("blocked", [])
+    for k in (16, 28):
+        bl.append((world[0] + step_dir[0] * k, world[1] + step_dir[1] * k))
+    del bl[:-300]
+    n = tst.get("stuck_n", 0)
+    if n % 3 == 2:
+        det, what = (-step_dir[0], -step_dir[1]), "先退後一點"
+    else:
+        det, what = rotate(step_dir, 90 if n % 2 == 0 else -90), "往旁邊閃一下"
+    tst["detour"] = det
+    tst["detour_until"] = now + random.uniform(0.45, 0.7)
+    tst["stuck_n"] = n + 1
+    tst["stuck_total"] = tst.get("stuck_total", 0) + 1
+    tst["plan_t"] = 0               # 閃完馬上重新規劃（會避開剛剛撞到的地方）
+    if tst.get("route_on"):
+        tst["route_on"] = False
+        route_failed()
+        log("照記住的路線走卻卡住 → 改成自己規劃")
+    tst["hist"] = []
+    log(f"好像被擋住了 → {what}，再重新規劃路線")
+    return det
+
+
 def town_step(frame, rect, cfg, inp, tst):
     """城鎮每一格畫面：追蹤主持人位置、規劃路線，回傳移動方向或 None"""
     tc = cfg["town"]
@@ -2494,8 +2591,13 @@ def town_step(frame, rect, cfg, inp, tst):
     lc = (W / 2, H / 2 + tc.get("feet_offset", 30))  # 角色腳下（碰撞判定的位置）
 
     # 鏡頭位移 → 更新目標在畫面上的位置，並累計角色在地圖上的位置
+    # （背景模式：畫面沒有更新就不算，避免誤判成「沒在動」）
+    stamp = IO.page.frame_t if IO.cdp else now
+    fresh = stamp != tst.get("frame_stamp")
+    tst["frame_stamp"] = stamp
+    track_ok = False
     prev = tst.get("prev")
-    if prev is not None and prev.shape == frame.shape:
+    if fresh and prev is not None and prev.shape == frame.shape:
         dx, dy, resp = cam_shift(prev, frame)
         if resp > 0.05 and abs(dx) < W * 0.3 and abs(dy) < H * 0.3:
             if tst.get("target") is not None:
@@ -2503,7 +2605,9 @@ def town_step(frame, rect, cfg, inp, tst):
                 tst["target"] = (tx + dx, ty + dy)
             wx, wy = tst.get("world", (0.0, 0.0))
             tst["world"] = (wx - dx, wy - dy)
-    tst["prev"] = frame
+            track_ok = True
+    if fresh:
+        tst["prev"] = frame
     if "trail" not in tst:
         town_reset(tst)
         tst["prev"] = frame
@@ -2511,6 +2615,11 @@ def town_step(frame, rect, cfg, inp, tst):
     tr = tst["trail"]
     if math.hypot(world[0] - tr[-1][0], world[1] - tr[-1][1]) >= 12 and len(tr) < 2000:
         tr.append(world)
+    if track_ok:
+        hist = tst.setdefault("hist", [])
+        hist.append((now, world))
+        while hist and now - hist[0][0] > 1.6:
+            hist.pop(0)
     # 撞過的位置換算回目前畫面座標
     blocked_screen = [(bx - world[0] + lc[0], by - world[1] + lc[1])
                       for bx, by in tst.get("blocked", [])]
@@ -2533,11 +2642,16 @@ def town_step(frame, rect, cfg, inp, tst):
     if now < tst.get("cooldown_until", 0):
         return None
 
-    # 定期讀字（讀字時先停下來，避免衝過頭）
+    # 定期讀字（讀字時先停下來，避免衝過頭）；離主持人還很遠時少讀幾次，走路比較順
     if now >= tst.get("ocr_next", 0) or tst.get("target") is None:
         MOVER.set(None, False)
+        tst["hist"], tst["move_since"] = [], None     # 停下來的時間不算進卡住偵測
         r = town_ocr(frame, rect, cfg, inp, tst)
-        tst["ocr_next"] = time.time() + (2.0 if tst.get("target") else 0.8)
+        gap = 0.8
+        if tst.get("target") is not None:
+            td_ = math.hypot(tst["target"][0] - lc[0], tst["target"][1] - lc[1])
+            gap = 3.0 if td_ > 350 else 2.0 if td_ > 150 else 1.2
+        tst["ocr_next"] = time.time() + gap
         if tst.pop("ocr_soon", False):
             tst["ocr_next"] = time.time() + 0.35
         tst["prev"] = frame  # 目標座標是以這張畫面為準，下一張再算位移
@@ -2550,6 +2664,9 @@ def town_step(frame, rect, cfg, inp, tst):
         tst["unknown_logged"] = False
         if r == "acted":
             return None
+
+    if now < tst.get("detour_until", 0):
+        return tst["detour"]
 
     target = tst.get("target")
     if target is None:
@@ -2567,9 +2684,10 @@ def town_step(frame, rect, cfg, inp, tst):
             if gd > 40:
                 desired = (gx / gd, gy / gd)
                 plan_path(frame, (lc[0] + gx, lc[1] + gy), start=lc)  # 更新障礙圖
-                sd = safe_key_dir(desired, lc, prefer=tst.get("key_dir"))
+                sd = safe_key_dir(desired, lc, blocked_screen, prefer=tst.get("key_dir"))
                 tst["key_dir"] = sd
-                return sd or desired
+                step = sd or desired
+                return _town_stuck(tst, now, world, step) or step
             tst["npc_w_reached"] = True
             tst["lost_logged"] = False
         if not tst.get("lost_logged"):
@@ -2587,9 +2705,6 @@ def town_step(frame, rect, cfg, inp, tst):
     if dist < 28:
         tst["ocr_next"] = 0  # 到了，馬上讀字看有沒有交談提示
         return None
-
-    if now < tst.get("detour_until", 0):
-        return tst["detour"]
 
     path = None
     rt = load_route()
@@ -2613,13 +2728,25 @@ def town_step(frame, rect, cfg, inp, tst):
             step_dir = (rx / rd, ry / rd)
             path = "route"
     if path is None:
-        path = plan_path(frame, (tx, ty), start=lc, blocked=blocked_screen)
+        # 完整規劃（A*）每 0.4 秒做一次；中間沿著上次規劃好的路線走（路線用地圖座標記）
+        tgt_w = (tx - lc[0] + world[0], ty - lc[1] + world[1])
+        pw = tst.get("path_w")
+        ptg = tst.get("plan_tgt") or (1e9, 1e9)
+        if pw is None or now >= tst.get("plan_t", 0) + 0.4 or \
+                math.hypot(tgt_w[0] - ptg[0], tgt_w[1] - ptg[1]) > 40:
+            p = plan_path(frame, (tx, ty), start=lc, blocked=blocked_screen)
+            tst["plan_t"], tst["plan_tgt"] = now, tgt_w
+            tst["path_w"] = pw = [(x - lc[0] + world[0], y - lc[1] + world[1]) for x, y in p] if p else None
+        else:
+            plan_path(frame, (lc[0], lc[1] - 1), start=lc)  # 只更新障礙圖（檢查前方用）
+        path = [(x - world[0] + lc[0], y - world[1] + lc[1]) for x, y in pw] if pw else None
     else:
         plan_path(frame, (lc[0], lc[1] - 1), start=lc)  # 只為了更新障礙圖
     if path == "route":
         pass
     elif path and len(path) > 2:
-        wx, wy = path[min(len(path) - 1, 5)]
+        i0 = min(range(len(path)), key=lambda i: math.hypot(path[i][0] - lc[0], path[i][1] - lc[1]))
+        wx, wy = path[min(len(path) - 1, i0 + 5)]
         wdx, wdy = wx - lc[0], wy - lc[1]
         wd = math.hypot(wdx, wdy) or 1
         step_dir = (wdx / wd, wdy / wd)
@@ -2642,48 +2769,7 @@ def town_step(frame, rect, cfg, inp, tst):
             step_dir = sd
         tst["key_dir"] = sd
     tst["last_dir"] = step_dir
-
-    # 卡住偵測：按著方向鍵 1 秒，畫面卻幾乎沒動
-    # （看「實際位移」而不是累計移動量，來回抖動也算卡住）
-    hist = tst.setdefault("hist", [])
-    hist.append((now, world))
-    while hist and now - hist[0][0] > 1.5:
-        hist.pop(0)
-    if len(hist) >= 3 and now - hist[0][0] > 0.8:
-        total = math.hypot(world[0] - hist[0][1][0], world[1] - hist[0][1][1])
-        if total < 12 and tst.get("route_on") and tst.get("route_stuck", 0) < 4:
-            # 照路線走時被邊角卡到：先試旁邊 45° 的方向，不急著放棄路線
-            k = tst.get("route_stuck", 0)
-            tst["route_stuck"] = k + 1
-            tst["detour"] = rotate(step_dir, 45 if k % 2 == 0 else -45)
-            tst["detour_until"] = now + 0.35 + 0.15 * k
-            tst["hist"] = []
-            return tst["detour"]
-        if total < 12:
-            # 記住撞到的地方（角色前方一格），之後規劃路線會避開
-            bl = tst.setdefault("blocked", [])
-            for k in (16, 28):
-                bl.append((world[0] + step_dir[0] * k, world[1] + step_dir[1] * k))
-            del bl[:-300]
-            n = tst.get("stuck_n", 0)
-            sx = 1 if step_dir[0] > 0 else -1
-            sy = 1 if step_dir[1] > 0 else -1
-            options = [(sx, 0), (0, sy), (0, -sy), (-sx, 0)]
-            names = ["只走左右", "只走上下", "反方向上下繞", "反方向左右繞"]
-            tst["detour"] = options[n % 4]
-            tst["detour_until"] = now + random.uniform(0.7, 1.2)
-            tst["stuck_n"] = n + 1
-            tst["stuck_total"] = tst.get("stuck_total", 0) + 1
-            if tst.get("route_on"):
-                tst["route_on"] = False
-                route_failed()
-                log("照記住的路線走卻卡住 → 改成自己規劃")
-            tst["hist"] = []
-            log(f"好像被擋住了 → {names[n % 4]}")
-            return tst["detour"]
-        if total > 40:
-            tst["stuck_n"] = 0
-    return step_dir
+    return _town_stuck(tst, now, world, step_dir) or step_dir
 
 
 def handle_menu(kind, sct, rect, cfg, inp, st):
@@ -3244,6 +3330,13 @@ def run(cfg):
     vision = Vision(cfg)
     mcfg = cfg["move"]
     planner = Planner(mcfg)
+    mmap = None
+    if mcfg.get("minimap", True):
+        try:
+            import minimap as _mmod
+            mmap = _mmod.MiniMap(BASE_DIR, keys=mcfg.get("mode", "keys") == "keys", log=log)
+        except Exception as e:
+            log(f"小地圖功能載入失敗（照舊走路）：{e}")
     MOVER = Mover(mcfg, dry)
     MOVER.start()
     watcher = OcrWatcher(cfg)
@@ -3283,6 +3376,7 @@ def run(cfg):
     vp_next = 0
     panel_next = 0
     zoom_at, was_battle = 0, False
+    bumps, mm_snap_next = 0, 0
     win_next = time.time() + 10
 
     try:
@@ -3434,6 +3528,21 @@ def run(cfg):
                 # 每一場剛進戰鬥：記下時間，稍後用滾輪把視野拉大
                 if in_battle and not was_battle:
                     zoom_at = now + 2.0
+                    last_coord, coord_same_since = None, now
+                    bumps = 0
+                    with watcher.lock:              # 上一場的地圖名稱不要帶到這一場
+                        watcher.res.pop("map_name", None)
+                        watcher.last_map = None
+                    if mmap:
+                        mmap.new_game()
+                if was_battle and not in_battle:
+                    if mmap:
+                        mmap.save()
+                        st_ = mmap.stats
+                        log(f"這局撞到東西 {bumps} 次；小地圖幫忙轉彎 {st_['steer']} 次、"
+                            f"繞路 {st_['reroute']} 次、跳過走不到的東西 {st_['unreach']} 次")
+                    else:
+                        log(f"這局撞到東西 {bumps} 次")
                 was_battle = in_battle
 
                 # ---- 休息排程（只在城鎮、一局結束後）----
@@ -3479,6 +3588,11 @@ def run(cfg):
                         td = town_step(frame, rect, cfg, inp, st_town)
                         W_, H_ = rect[2], rect[3]
                         MOVER.set(td, td is not None, (rect[0] + W_ / 2, rect[1] + H_ / 2))
+                        # 記下「開始連續走路」的時間（卡住偵測要走一陣子才判斷）
+                        if td is None:
+                            st_town["move_since"], st_town["hist"] = None, []
+                        elif st_town.get("move_since") is None:
+                            st_town["move_since"] = time.time()
                         time.sleep(0.03)
                     else:
                         MOVER.set(None, False)
@@ -3556,6 +3670,12 @@ def run(cfg):
                         bst["world"] = (bst["world"][0] - sdx, bst["world"][1] - sdy)
                 bst["prev"] = frame
                 wx, wy = bst["world"]
+                mm_ok = False
+                if mmap:
+                    mmap.update(frame, now, bst["world"], res.get("map_name"))
+                    mm_ok = not dry and mmap.ready(now)
+                    if mm_ok:
+                        mmap.add_items(coins + ores + chests, lc, now)
                 bst["blocked"] = [b for b in bst["blocked"] if now - b[2] < 40]
                 bst["avoid"] = [a for a in bst["avoid"] if now - a[2] < 20]
                 blocked_scr = [(bx - wx + lc[0], by - wy + lc[1]) for bx, by, _ in bst["blocked"]]
@@ -3589,10 +3709,25 @@ def run(cfg):
                                     bst["path_dir"] = None
                             if bst.get("path_dir"):
                                 step = bst["path_dir"]
+                        # 小地圖：中間有牆就繞路；完全走不到（在牆的另一邊）就先不追
+                        if mm_ok:
+                            tdir = (dx / dist, dy / dist)
+                            st2 = mmap.route(tdir, dist, now)
+                            if st2 is None:
+                                bst["avoid"].append((tgt[0] - lc[0] + wx, tgt[1] - lc[1] + wy, now))
+                                planner.target, planner.repick_at = None, 0
+                            elif st2 != tdir:
+                                step = st2          # 小地圖說要繞路 → 照小地圖走
                         d = blend(d, step, 0.75)
                     elif planner.target is None:
+                        # 小地圖：前面快撞牆了 → 提早換方向
+                        if mm_ok and now < wander_next and \
+                                mmap.free_dist(_mmod.key_dir(wander) or wander, _mmod.LOOK) < _mmod.LOOK - 0.01:
+                            wander_next = now
                         if now >= wander_next or d is None:
-                            wander = rotate(wander if d is None else d, random.uniform(-110, 110))
+                            ed = mmap.explore_dir(d) if mm_ok else None
+                            # 小地圖：往空曠、還沒去過的地方走；沒有小地圖就隨便轉個方向
+                            wander = ed or rotate(wander if d is None else d, random.uniform(-110, 110))
                             wander_next = now + random.uniform(2, 5)
                         # 隨意走的方向前方是水 → 換個方向
                         if water is not None and water.any():
@@ -3617,7 +3752,12 @@ def run(cfg):
                         if planner.target is not None:
                             t_ = planner.target
                             bst["avoid"].append((t_[0] - lc[0] + wx, t_[1] - lc[1] + wy, now))
-                        d = rotate(d, random.choice([-1, 1]) * random.uniform(100, 150))
+                        esc = None
+                        if mm_ok:
+                            mmap.mark_block(d, now)          # 小地圖上記住這裡、也記住牆的顏色
+                            esc = mmap.escape_dir(d)
+                        d = esc or rotate(d, random.choice([-1, 1]) * random.uniform(100, 150))
+                        bumps += 1
                         escape_until = now + random.uniform(0.7, 1.2)
                         planner.target, planner.repick_at = None, 0
                         planner.ignore_chest_until = now + 3
@@ -3630,15 +3770,32 @@ def run(cfg):
                     if res["coord"] != last_coord:
                         last_coord, coord_same_since = res["coord"], now
                     elif now - coord_same_since > 2.5 and now >= escape_until:
-                        d = rotate(d or (1, 0), random.choice([-1, 1]) * random.uniform(100, 170))
+                        esc = None
+                        if mm_ok:
+                            mmap.mark_block(d, now)
+                            esc = mmap.escape_dir(d)
+                        d = esc or rotate(d or (1, 0), random.choice([-1, 1]) * random.uniform(100, 170))
+                        bumps += 1
                         escape_until = now + random.uniform(1.0, 1.8)
                         coord_same_since = now
                         planner.ignore_chest_until = now + 4
                         planner.target, planner.repick_at = None, 0
                         log(f"座標 {last_coord} 沒變，可能卡住 → 換方向")
 
+                # 小地圖：最後再確認一次前面不是牆（目標很近就不用管後面的牆）
+                if mm_ok and d is not None:
+                    need = None
+                    if planner.target is not None:
+                        need = math.hypot(planner.target[0] - lc[0], planner.target[1] - lc[1]) / \
+                            (mmap.scale or _mmod.DEFAULT_SCALE)
+                    d = mmap.steer(d, need)
                 MOVER.set(d, True, center)
 
+                if cfg["debug_snapshots"] and mmap and now >= mm_snap_next:
+                    mm_snap_next = now + 8
+                    img_ = mmap.debug_image(d)
+                    if img_ is not None:
+                        save_image(img_, "minimap")
                 if cfg["debug_snapshots"] and now >= snap_next:
                     snap_next = now + 4
                     save_snapshot(frame, "move", coins, chests, lc, d, ores=ores,
