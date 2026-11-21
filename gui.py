@@ -39,6 +39,7 @@ class App:
         rb.LOG_HOOKS.append(self.q.put)
 
         self.cfg = self.load_cfg()
+        self.cfg_mtime = self._cfg_mtime()
         self.build()
         self.fill_from_cfg()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -62,7 +63,28 @@ class App:
         rb.clear_route()
         self.add_log("已清除記住的城鎮路線，下次會重新規劃並記住新的")
 
+    def _cfg_mtime(self):
+        try:
+            return os.path.getmtime(rb.CONFIG_PATH)
+        except OSError:
+            return 0
+
+    def reload_if_edited(self):
+        """設定檔在程式外被改過（例如用記事本改）→ 先讀回來、更新畫面，再存，才不會把它蓋掉"""
+        mt = self._cfg_mtime()
+        if mt and getattr(self, "cfg_mtime", None) is not None and abs(mt - self.cfg_mtime) > 0.01:
+            try:
+                self.cfg = self.load_cfg()
+                self.fill_from_cfg()
+                self.add_log("偵測到設定檔被修改過 → 已重新讀取")
+            except Exception as e:
+                self.add_log(f"設定檔讀取失敗（請檢查格式）：{e}")
+                return False
+        return True
+
     def save_cfg(self, quiet=False):
+        if not self.reload_if_edited():
+            return
         c = self.cfg
         c["window_title"] = self.v_title.get().strip()
         c.setdefault("browser", {})["mode"] = self.v_mode.get() or "cdp"
@@ -125,6 +147,7 @@ class App:
         try:
             with open(rb.CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(c, f, ensure_ascii=False, indent=2)
+            self.cfg_mtime = self._cfg_mtime()
             if not quiet:
                 self.add_log("設定已儲存")
         except Exception as e:
