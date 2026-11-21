@@ -19,6 +19,7 @@ import numpy as np
 
 LOOK = 7.0           # 往前檢查幾個小地圖像素（約 10 格地圖）
 DEFAULT_SCALE = 20.0  # 還沒量到之前：畫面上幾個像素 ≈ 小地圖 1 個像素
+MAGNET_NEAR = 30.0    # 磁鐵在這個距離內（小地圖像素，約 2～3 個畫面）就先去撿
 
 
 # ---------------------------------------------------------------------
@@ -254,9 +255,18 @@ class MiniMap:
         self.block = None
         self.obst, self.obst_t = None, 0.0
         self.route_cache = None
-        self.steer_last = None
+        self.steer_last, self.steer_t = None, 0.0
+        self.chest_pts, self.magnet_pts = [], []
+        self.goal = None            # (x, y, 種類)
+        self.goal_path, self.goal_path_t = None, 0.0
+        self.goal_arrive_t = None
+        self.goal_seen_t = 0.0
+        self.goal_best, self.goal_best_t = None, 0.0
+        self.goal_call_t = 0.0
+        self.banned = []            # (x, y, 到什麼時候) 走不到／撿不到的圖示，先跳過
+        self.goal_log_t = 0.0
         self.save_t = time.time() + 90
-        self.stats = {"steer": 0, "reroute": 0, "unreach": 0}
+        self.stats = {"steer": 0, "reroute": 0, "unreach": 0, "goals": 0, "picked": 0}
 
     def _file(self, name):
         safe = re.sub(r"[^\w一-鿿]+", "_", name).strip("_") or "map"
@@ -371,6 +381,7 @@ class MiniMap:
             self.set_name(name)
         mm = frame[my:my + mh, mx:mx + mw]
         red, white, gold = _masks(mm)
+        self._find_icons(red, gold)
 
         # 自己的位置
         cands = find_arrow(mm, red, white)
@@ -551,22 +562,24 @@ class MiniMap:
             self.steer_last = None
             return d
         cands = sorted(self._cands(), key=lambda c: -(c[0] * d[0] + c[1] * d[1]))
-        if self.steer_last is not None and self.steer_last[0] * d[0] + self.steer_last[1] * d[1] > 0 and \
-                self.free_dist(self.steer_last, need) >= need - 0.01:
-            return self.steer_last
+        # 剛換過的方向還走得通，就多走一下（避免上、下來回抖）
+        if self.steer_last is not None and self.free_dist(self.steer_last, need) >= need - 0.01:
+            dot = self.steer_last[0] * d[0] + self.steer_last[1] * d[1]
+            if dot > 0 or (dot > -0.3 and time.time() - self.steer_t < 0.8):
+                return self.steer_last
         best, best_f = None, self.free_dist(q, need)
         for c in cands:
             if c[0] * d[0] + c[1] * d[1] < -0.72:        # 不要往回走超過 135°
                 break
             f = self.free_dist(c, need)
             if f >= need - 0.01:
-                self.steer_last = c
+                self.steer_last, self.steer_t = c, time.time()
                 self.stats["steer"] += 1
                 return c
             if f > best_f + 1:
                 best, best_f = c, f
         if best is not None:
-            self.steer_last = best
+            self.steer_last, self.steer_t = best, time.time()
             self.stats["steer"] += 1
             return best
         return d
@@ -607,6 +620,139 @@ class MiniMap:
                 best, best_s = c, s
         return best
 
+    # ---------- 小地圖上的寶箱、磁鐵 ----------
+    def _find_icons(self, red, gold):
+        """寶箱 = 金色圖示；磁鐵 = 紅色 U 字（上面中間是空的，自己的箭頭是實心三角形）"""
+        chests = []
+        g = cv2.dilate(gold.astype(np.uint8), np.ones((3, 3), np.uint8))
+        n, _lab, st, _ = cv2.connectedComponentsWithStats(g)
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            if 8 <= w <= 60 and 6 <= h <= 60 and a >= 30:
+                chests.append((x + w / 2.0, y + h / 2.0))
+        magnets = []
+        n, lab, st, _ = cv2.connectedComponentsWithStats(red.astype(np.uint8))
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            if not (8 <= w <= 20 and 5 <= h <= 14 and 25 <= a <= 140):
+                continue
+            comp = lab[y:y + h, x:x + w] == i
+            if comp[:max(1, h // 2), w // 3:w - w // 3].mean() > 0.35:
+                continue
+            cx, cy = x + w / 2.0, y + h / 2.0
+            if self.pos is not None and math.hypot(cx - self.pos[0], cy - self.pos[1]) < 8:
+                continue        # 自己的箭頭
+            magnets.append((cx, cy))
+        self.chest_pts, self.magnet_pts = chests, magnets
+
+    def _is_banned(self, x, y, now):
+        self.banned = [b for b in self.banned if b[2] > now]
+        return any(math.hypot(x - bx, y - by) < 5 for bx, by, _ in self.banned)
+
+    def magnet_near(self):
+        if self.pos is None:
+            return False
+        g = self.goal          # 正在去撿的磁鐵（快到時會被自己的箭頭蓋住，看不到也算）
+        if g is not None and g[2] == "magnet" and math.hypot(g[0] - self.pos[0], g[1] - self.pos[1]) <= MAGNET_NEAR:
+            return True
+        return any(math.hypot(x - self.pos[0], y - self.pos[1]) <= MAGNET_NEAR for x, y in self.magnet_pts)
+
+    def goal_close(self):
+        """快走到寶箱／磁鐵了（最後幾步直接走過去）"""
+        g = self.goal
+        return g is not None and self.pos is not None and math.hypot(g[0] - self.pos[0], g[1] - self.pos[1]) < 6
+
+    def goal_dir(self, now, only_magnet=False):
+        """畫面上沒東西撿時：往小地圖上最近的磁鐵／寶箱走（磁鐵優先）。回傳方向或 None"""
+        if self.pos is None:
+            return None
+        px, py = self.pos
+        if now - self.goal_call_t > 1.0:      # 中間去撿畫面上的東西了 → 重新計時
+            self.goal_best, self.goal_best_t, self.goal_arrive_t = None, now, None
+        self.goal_call_t = now
+        cands = [(x, y, "magnet") for x, y in self.magnet_pts]
+        if not only_magnet:
+            cands += [(x, y, "chest") for x, y in self.chest_pts]
+        cands = [c for c in cands if not self._is_banned(c[0], c[1], now)]
+        if only_magnet:
+            cands = [c for c in cands if math.hypot(c[0] - px, c[1] - py) <= MAGNET_NEAR]
+        g = self.goal
+        if g is not None and only_magnet and g[2] != "magnet":
+            g = self.goal = None            # 只找磁鐵的時候，原本要去的寶箱先放著
+            self.goal_path, self.goal_arrive_t = None, None
+        if g is not None:
+            same = [c for c in cands if c[2] == g[2] and math.hypot(c[0] - g[0], c[1] - g[1]) < 4]
+            gd = math.hypot(g[0] - px, g[1] - py)
+            if same:
+                if math.hypot(same[0][0] - g[0], same[0][1] - g[1]) > 1.5:
+                    self.goal_path_t = 0
+                g = self.goal = same[0]
+                self.goal_seen_t = now
+            elif gd < 11 and now - self.goal_seen_t < 6 and gd >= 1.5:
+                pass    # 靠近時圖示被自己的箭頭蓋住了 → 照記住的位置繼續走過去
+            else:
+                if gd < 11:
+                    self.stats["picked"] += 1      # 走到了／圖示消失了 = 撿到了
+                g = self.goal = None
+                self.goal_path, self.goal_arrive_t = None, None
+        if g is None:
+            if not cands:
+                return None
+            val = {"magnet": 3.0, "chest": 1.0}
+            g = self.goal = max(cands, key=lambda c: val[c[2]] / (math.hypot(c[0] - px, c[1] - py) + 8))
+            self.goal_path, self.goal_path_t, self.goal_arrive_t = None, 0.0, None
+            self.goal_seen_t = now
+            self.goal_best, self.goal_best_t = None, now
+            self.stats["goals"] += 1
+            if now - self.goal_log_t > 10:
+                self.goal_log_t = now
+                self.log("小地圖：畫面上沒東西撿 → 往" + ("磁鐵" if g[2] == "magnet" else "寶箱") + "走"
+                         if not only_magnet else "小地圖：附近有磁鐵 → 先去撿")
+        gx, gy = g[0], g[1]
+        dist = math.hypot(gx - px, gy - py)
+        # 6 秒都沒有更接近 → 大概走不過去，先跳過這個
+        if self.goal_best is None or dist < self.goal_best - 1.5:
+            self.goal_best, self.goal_best_t = dist, now
+        elif now - self.goal_best_t > 6:
+            self.banned.append((gx, gy, now + 60))
+            self.stats["unreach"] += 1
+            self.goal, self.goal_path = None, None
+            return None
+        # 走到了圖示卻一直還在 → 撿不到，先跳過
+        if dist < 2.5:
+            if self.goal_arrive_t is None:
+                self.goal_arrive_t = now
+            elif now - self.goal_arrive_t > 4:
+                self.banned.append((gx, gy, now + 60))
+                self.goal = None
+                return None
+        if self.goal_path is None or now - self.goal_path_t > 1.2:
+            obst = self._obstacles(now).copy()
+            H, W = obst.shape
+            sx, sy = int(min(max(px, 0), W - 1)), int(min(max(py, 0), H - 1))
+            ex, ey = int(min(max(gx, 0), W - 1)), int(min(max(gy, 0), H - 1))
+            obst[max(0, sy - 2):sy + 3, max(0, sx - 2):sx + 3] = False
+            obst[max(0, ey - 3):ey + 4, max(0, ex - 3):ex + 4] = False   # 圖示蓋住的地方
+            path = astar(obst, (sx, sy), (ex, ey), max_nodes=25000)
+            self.goal_path_t = now
+            if path is None:
+                self.stats["unreach"] += 1
+                self.banned.append((gx, gy, now + 30))     # 走不到 → 30 秒內先不去
+                self.goal, self.goal_path = None, None
+                return None
+            self.goal_path = path
+        if dist < 6:        # 最後幾步：直接走過去（圖示底下的地形看不到，不要被當成牆）
+            return _norm((gx - px, gy - py))
+        path = self.goal_path
+        i0 = min(range(len(path)), key=lambda i: math.hypot(path[i][0] - px, path[i][1] - py))
+        wp = next((p for p in path[i0:] if math.hypot(p[0] - px, p[1] - py) >= 4), path[-1])
+        nd = _norm((wp[0] - px, wp[1] - py))
+        if nd is None:
+            nd = _norm((gx - px, gy - py))
+        if nd is None:
+            return None
+        return self.steer(nd, need=min(LOOK, math.hypot(wp[0] - px, wp[1] - py)))
+
     def mark_block(self, d, now):
         """撞到東西的地方（自己前面一點）記成障礙，這場都會避開"""
         if self.pos is None or now - self.pos_t > 1.0 or d is None or self.block is None:
@@ -623,6 +769,7 @@ class MiniMap:
                 self.lut = None
                 self.dirty = True
         self.obst = None
+        self.goal_path_t = 0        # 重新規劃去寶箱／磁鐵的路
 
     def add_items(self, pts, center, now):
         """畫面上的金幣／礦石／寶箱都掉在走得到的地方 → 那裡的顏色算能走"""
@@ -698,6 +845,13 @@ class MiniMap:
         img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
         for t in self.trail[-200:]:
             cv2.circle(img, (int(t[1] * 3), int(t[2] * 3)), 1, (255, 255, 0), -1)
+        for x, y in self.chest_pts:
+            cv2.rectangle(img, (int(x * 3) - 15, int(y * 3) - 12), (int(x * 3) + 15, int(y * 3) + 12), (0, 215, 255), 2)
+        for x, y in self.magnet_pts:
+            cv2.circle(img, (int(x * 3), int(y * 3)), 16, (255, 0, 255), 2)
+        if self.goal_path:
+            for a, b in zip(self.goal_path, self.goal_path[1:]):
+                cv2.line(img, (a[0] * 3, a[1] * 3), (b[0] * 3, b[1] * 3), (0, 255, 0), 2)
         if self.pos is not None:
             p = (int(self.pos[0] * 3), int(self.pos[1] * 3))
             cv2.circle(img, p, 6, (0, 255, 0), 2)

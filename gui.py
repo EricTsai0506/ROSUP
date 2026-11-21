@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -179,6 +180,11 @@ class App:
                                  state="disabled")
         for b in (self.b_start, self.b_pause, self.b_stop):
             b.pack(side="left", expand=True, fill="x", padx=4)
+
+        # 掛機統計（每秒更新：場數、每小時幾場、平均每場時間、每場撞牆次數）
+        self.stats_lbl = ttk.Label(self.root, text=rb.stats_text(), foreground="#444")
+        self.stats_lbl.pack(fill="x", padx=12, pady=(0, 2))
+        self.stats_next = 0
 
         nb = ttk.Notebook(self.root)
         nb.pack(fill="x", **pad)
@@ -504,6 +510,10 @@ class App:
             # 執行緒已經結束（按了停止、自動停止或出錯）→ 恢復成可以再按「開始」
             self.was_running = False
             self.set_idle()
+            self.stats_lbl.config(text=rb.stats_text())
+        if running and time.time() >= self.stats_next:
+            self.stats_next = time.time() + 1.0
+            self.stats_lbl.config(text=rb.stats_text())
         self.root.after(150, self.poll)
 
     def set_idle(self):

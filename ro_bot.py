@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.2.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.3.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -330,6 +330,8 @@ DEFAULT_CONFIG = {
         "character_offset": [0, 0],
         "stuck_check": True,
         "minimap": True,             # 用右上角小地圖避開牆壁／水（會自己學每張地圖的地形）
+        "minimap_goals": True,       # 畫面上沒東西撿時，往小地圖上的寶箱／磁鐵走
+        "magnet_first": True,        # 小地圖上附近有磁鐵就先去撿（畫面上有寶箱時還是先撿寶箱）
     },
     "browser": {
         "mode": "cdp",
@@ -3261,6 +3263,32 @@ def wait_screen_change(sct, rect, before, timeout=2.5, regions=None):
 # =====================================================================
 #  主流程
 # =====================================================================
+STATS = {"start": None, "active": 0.0, "last": 0.0, "games": []}
+
+
+def stats_reset():
+    t = time.time()
+    STATS.update(start=t, active=0.0, last=t, games=[])
+
+
+def stats_text():
+    """視窗上顯示的掛機統計（只算打完的場次；休息、暫停的時間不算）"""
+    if STATS.get("start") is None:
+        return "本次掛機：還沒開始"
+    act = STATS["active"]
+    hh, mm = divmod(int(act // 60), 60)
+    head = f"本次掛機 {hh}:{mm:02d}"
+    done = [g for g in STATS["games"] if g["done"]]
+    if not done:
+        return head + "｜第一場打完後顯示統計"
+    n = len(done)
+    gph = n / max(act / 3600.0, 1e-6)
+    avg = sum(g["dur"] for g in done) / n
+    bumps = sum(g["bumps"] for g in done) / n
+    return (f"{head}｜{n} 場｜每小時 {gph:.1f} 場｜平均每場 {int(avg // 60)}:{int(avg % 60):02d}"
+            f"｜每場撞牆 {bumps:.1f} 次")
+
+
 def run(cfg):
     global MOVER
     dry = cfg["dry_run"]
@@ -3352,6 +3380,8 @@ def run(cfg):
     paused = False
     CONTROL["paused"] = False
     CONTROL["status"] = ""
+    stats_reset()
+    battle_t0 = time.time()
     GAME.update(games_done=0, games_since_rest=0, rest_target=None, rest_until=None,
                 game_counted=False, phase=None, battle_seen=0, last_sig=None,
                 batch_target=None, max_timer=0, ending_logged=False)
@@ -3400,6 +3430,10 @@ def run(cfg):
                     log("暫停" if paused else "繼續")
                 if use_cdp:
                     page.capture_paused = paused or GAME.get("rest_until") is not None
+                t_ = time.time()      # 統計用：實際在跑的時間（暫停、休息不算）
+                if not paused and GAME.get("rest_until") is None:
+                    STATS["active"] += min(30.0, max(0.0, t_ - STATS["last"]))
+                STATS["last"] = t_
                 if paused:
                     MOVER.set(None, False)
                     time.sleep(0.1)
@@ -3530,6 +3564,7 @@ def run(cfg):
                     zoom_at = now + 2.0
                     last_coord, coord_same_since = None, now
                     bumps = 0
+                    battle_t0 = now
                     with watcher.lock:              # 上一場的地圖名稱不要帶到這一場
                         watcher.res.pop("map_name", None)
                         watcher.last_map = None
@@ -3540,9 +3575,14 @@ def run(cfg):
                         mmap.save()
                         st_ = mmap.stats
                         log(f"這局撞到東西 {bumps} 次；小地圖幫忙轉彎 {st_['steer']} 次、"
-                            f"繞路 {st_['reroute']} 次、跳過走不到的東西 {st_['unreach']} 次")
+                            f"繞路 {st_['reroute']} 次、跳過走不到的東西 {st_['unreach']} 次、"
+                            f"帶去撿寶箱／磁鐵 {st_['goals']} 次")
                     else:
                         log(f"這局撞到東西 {bumps} 次")
+                    done_ = bool(GAME.get("game_counted")) and now - battle_t0 > 60
+                    STATS["games"].append({"dur": now - battle_t0, "bumps": bumps, "done": done_})
+                    if done_:
+                        log("統計：" + stats_text())
                 was_battle = in_battle
 
                 # ---- 休息排程（只在城鎮、一局結束後）----
@@ -3681,9 +3721,18 @@ def run(cfg):
                 blocked_scr = [(bx - wx + lc[0], by - wy + lc[1]) for bx, by, _ in bst["blocked"]]
                 avoid_scr = [(ax - wx + lc[0], ay - wy + lc[1]) for ax, ay, _ in bst["avoid"]]
 
+                gdir = None
                 if now >= escape_until:
                     tgt = planner.plan(coins, ores, chests, lc[0], lc[1], now, avoid=avoid_scr)
-                    if tgt is not None:
+                    # 小地圖：畫面上沒東西撿 → 往小地圖上的磁鐵／寶箱走；附近有磁鐵 → 先撿磁鐵
+                    if mm_ok and mcfg.get("minimap_goals", True):
+                        if tgt is None and planner.target is None:
+                            gdir = mmap.goal_dir(now)
+                        elif mcfg.get("magnet_first", True) and planner.mode != "chest" and mmap.magnet_near():
+                            gdir = mmap.goal_dir(now, only_magnet=True)
+                    if gdir is not None:
+                        d = blend(d, gdir, 0.75)
+                    elif tgt is not None:
                         dx, dy = tgt[0] - lc[0], tgt[1] - lc[1]
                         dist = math.hypot(dx, dy) or 1
                         step = (dx / dist, dy / dist)
@@ -3783,7 +3832,7 @@ def run(cfg):
                         log(f"座標 {last_coord} 沒變，可能卡住 → 換方向")
 
                 # 小地圖：最後再確認一次前面不是牆（目標很近就不用管後面的牆）
-                if mm_ok and d is not None:
+                if mm_ok and d is not None and not (gdir is not None and mmap.goal_close()):
                     need = None
                     if planner.target is not None:
                         need = math.hypot(planner.target[0] - lc[0], planner.target[1] - lc[1]) / \
