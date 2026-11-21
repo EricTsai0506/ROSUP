@@ -320,8 +320,8 @@ class App:
             for w in f1.grid_slaves():
                 if w not in keep:
                     w.grid_remove()
-            nb.hide(f2)
-            nb.hide(f4)
+            nb.forget(f2)   # 從分頁移除（隱藏的分頁仍會撐大視窗）；設定照常生效
+            nb.forget(f4)
 
         # 休息排程
         f3 = ttk.Frame(nb, padding=8)
@@ -374,12 +374,12 @@ class App:
         self.txt.tag_configure("act", foreground="#9cdcfe")
         if compact:
             self.root.minsize(560, 300)
-            self.root.update_idletasks()
-            bottom = max(w.winfo_y() + w.winfo_height() for w in self.root.winfo_children()
-                         if w.winfo_manager())
-            self.root.geometry(f"680x{max(bottom, self.root.winfo_reqheight()) + 8}")
-            self.root.after(50, lambda: self.root.geometry(
-                f"680x{max(w.winfo_y() + w.winfo_height() for w in self.root.winfo_children() if w.winfo_manager()) + 8}"))
+
+            def fit():
+                self.root.update_idletasks()
+                self.root.geometry(f"{max(680, self.root.winfo_reqwidth())}x{self.root.winfo_reqheight()}")
+            fit()
+            self.root.after(200, fit)
 
     def fill_from_cfg(self):
         c = self.cfg
