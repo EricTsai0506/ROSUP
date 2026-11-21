@@ -211,6 +211,7 @@ class App:
         uf.grid(row=len(checks) + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).pack(
             side="left")
+        keep = {lg, uf, mf, ef}   # 精簡介面時基本頁只留這幾區
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
@@ -305,6 +306,15 @@ class App:
         ttk.Checkbutton(f4, text="清單以外的寶箱，選卡片等級高的（普通<優良<稀有<史詩<傳說）",
                         variable=self.v_chest_rarity).grid(row=2, column=0, columnspan=2,
                                                            sticky="w")
+
+        # 精簡介面：只顯示自動登入、操作方式、線上更新；其他設定隱藏但照常生效
+        # （設定檔 "ui": {"show_all": true} 可以全部顯示）
+        if not self.cfg.get("ui", {}).get("show_all", False):
+            for w in f1.grid_slaves():
+                if w not in keep:
+                    w.grid_remove()
+            nb.hide(f2)
+            nb.hide(f4)
 
         # 休息排程
         f3 = ttk.Frame(nb, padding=8)
