@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.3.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.3.2"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -3908,9 +3908,12 @@ def run(cfg):
 
                 if cfg["debug_snapshots"] and mmap and now >= mm_snap_next:
                     mm_snap_next = now + 8
-                    img_ = mmap.debug_image(d)
-                    if img_ is not None:
-                        save_image(img_, "minimap")
+                    try:
+                        img_ = mmap.debug_image(d)
+                        if img_ is not None:
+                            save_image(img_, "minimap")
+                    except Exception as e:      # 除錯圖出錯不要讓整個程式停掉
+                        log(f"小地圖除錯圖存檔失敗（不影響掛機）：{e}")
                 if cfg["debug_snapshots"] and now >= snap_next:
                     snap_next = now + 4
                     save_snapshot(frame, "move", coins, chests, lc, d, ores=ores,

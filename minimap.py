@@ -239,10 +239,15 @@ class MiniMap:
         self.scale_obs = []
         self.loaded_name = None
         self.dirty = False
+        self.visit = None
+        self.block = None
+        self.obst = None
 
     def new_game(self):
         """每一場戰鬥開始：先把上一場學到的存檔，等讀到這場的地圖名稱再載入那張地圖的地形
         （不同關卡的地形不會混在一起）"""
+        self.disabled = False           # 上一場出錯關掉的，新的一場再試一次
+        self.err_logged = False
         if self.name and self.dirty:
             self.save()
         self._clear_model()
@@ -350,8 +355,9 @@ class MiniMap:
             self.panel_next = now + (5.0 if p else 1.5)
             if p:
                 self.panel_fail = 0
-                if self.panel is None or p[0][2:] != self.panel[0][2:] or \
-                        abs(p[0][0] - self.panel[0][0]) > 3 or abs(p[0][1] - self.panel[0][1]) > 3:
+                if self.panel is not None and all(abs(a - b) <= 8 for a, b in zip(p[0], self.panel[0])):
+                    p = self.panel          # 只差幾個像素（量的誤差）→ 照舊，不重來
+                if self.panel is None or p is not self.panel:
                     if self.panel is not None:
                         self.save()
                         self._clear_model()
@@ -430,7 +436,8 @@ class MiniMap:
             return
         px, py = self.pos
         # 走過的路
-        if self.visit is None or self.visit.shape != mm.shape[:2]:
+        if self.visit is None or self.visit.shape != mm.shape[:2] or self.block is None \
+                or self.block.shape != mm.shape[:2]:
             self.visit = np.zeros(mm.shape[:2], np.uint8)
             self.block = np.zeros(mm.shape[:2], np.uint8)
         if not self.trail or math.hypot(px - self.trail[-1][1], py - self.trail[-1][2]) >= 1.5:
@@ -494,7 +501,10 @@ class MiniMap:
         small[1:] = st[1:, 4] <= 2
         obst = obst & ~small[lab]
         if self.block is not None:
-            obst = obst | (self.block > 0)
+            if self.block.shape == obst.shape:
+                obst = obst | (self.block > 0)
+            else:
+                self.block = None
         self.obst, self.obst_t = obst, now
         return obst
 
@@ -861,3 +871,32 @@ class MiniMap:
         cv2.putText(img, txt.encode("ascii", "replace").decode(), (4, 14), cv2.FONT_HERSHEY_SIMPLEX,
                     0.45, (255, 255, 255), 1)
         return img
+
+
+# ---------------------------------------------------------------------
+#  保險：小地圖任何地方出錯，只會關掉這場的小地圖功能，不會讓整個程式停掉
+# ---------------------------------------------------------------------
+def _safe(name, default):
+    fn = getattr(MiniMap, name)
+
+    def wrapper(self, *a, **k):
+        if self.disabled:
+            return default(a) if callable(default) else default
+        try:
+            return fn(self, *a, **k)
+        except Exception as e:
+            if not self.err_logged:
+                self.log(f"小地圖出錯（這場先不用小地圖，照舊走路）：{e}")
+                self.err_logged = True
+            self.disabled = True
+            return default(a) if callable(default) else default
+    wrapper.__name__ = name
+    setattr(MiniMap, name, wrapper)
+
+
+for _n, _d in (("ready", False), ("steer", lambda a: a[0] if a else None),
+               ("route", lambda a: a[0] if a else None), ("goal_dir", None), ("explore_dir", None),
+               ("escape_dir", None), ("mark_block", None), ("add_items", None), ("magnet_near", False),
+               ("goal_close", False), ("debug_image", None), ("save", None),
+               ("free_dist", lambda a: a[1] if len(a) > 1 else 0.0)):
+    _safe(_n, _d)
