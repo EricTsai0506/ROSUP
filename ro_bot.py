@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.0.9"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.1.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -221,7 +221,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 11,
+    "config_version": 12,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -312,6 +312,7 @@ DEFAULT_CONFIG = {
     "move": {
         "enabled": True,
         "mode": "keys",
+        "zoom_out": 10,              # 進入戰鬥後滾輪往上滾幾格，把視野拉大（0 = 不調整）
         "keys": {"up": "w", "down": "s", "left": "a", "right": "d"},
         "mouse_radius": 160,
         "coin_weight": 1.0,
@@ -393,7 +394,7 @@ def migrate_config(cfg, ver=None):
     if ver < 11:  # 主力以外的技能預設全部勾放逐（使用者自己改過的就不動）
         if cfg["levelup"].get("banish", []) in ([], ["攻擊：屬性附加"]):
             cfg["levelup"]["banish"] = ["聖靈召喚", "心靈爆破", "火焰之壁", "冰凍術", "火狩", "雷爆術", "攻擊：屬性附加"]
-    cfg["config_version"] = 11
+    cfg["config_version"] = 12
     return cfg
 
 
@@ -3192,6 +3193,7 @@ def run(cfg):
            "path_next": 0, "path_tgt": None, "path_dir": None}
     vp_next = 0
     panel_next = 0
+    zoom_at, was_battle = 0, False
     win_next = time.time() + 10
 
     try:
@@ -3340,6 +3342,10 @@ def run(cfg):
                     log("很久沒看到戰鬥畫面，改回城鎮模式")
                     GAME["phase"] = "town"
                 in_battle = GAME["phase"] == "battle"
+                # 每一場剛進戰鬥：記下時間，稍後用滾輪把視野拉大
+                if in_battle and not was_battle:
+                    zoom_at = now + 2.0
+                was_battle = in_battle
 
                 # ---- 休息排程（只在城鎮、一局結束後）----
                 sch = cfg.get("schedule", {})
@@ -3399,6 +3405,16 @@ def run(cfg):
                 frame = grab(sct, rect)
                 H, W = frame.shape[:2]
                 ox, oy = rect[0], rect[1]
+                # 視野拉大（滑鼠滾輪往上）
+                if zoom_at and now >= zoom_at:
+                    zoom_at = 0
+                    zn = int(mcfg.get("zoom_out", 10) or 0)
+                    if zn > 0:
+                        log(f"拉大視野（滾輪往上 {zn} 格）")
+                        MOVER.set(None, False)
+                        inp.scroll(ox + W * 0.75, oy + H * 0.45, -zn, "拉大視野")
+                        park_mouse(rect)
+                        continue
                 # 誤點技能欄跳出的說明框 → 關掉
                 if now >= panel_next:
                     panel_next = now + 1.0

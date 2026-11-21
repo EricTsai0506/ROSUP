@@ -1,5 +1,5 @@
 {
-  "config_version": 11,
+  "config_version": 12,
   "window_title": "Edge",
   "dry_run": false,
   "debug_snapshots": true,
@@ -179,7 +179,8 @@
       0,
       0
     ],
-    "stuck_check": true
+    "stuck_check": true,
+    "zoom_out": 10
   },
   "browser": {
     "mode": "cdp",
