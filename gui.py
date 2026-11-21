@@ -13,6 +13,7 @@ from tkinter import ttk, messagebox
 
 import ro_bot as rb
 import updater
+import licensing
 
 APP_TITLE = "掛機小幫手"
 CHEST_EFFECT = dict(getattr(rb, "CHEST_ITEMS", []))
@@ -43,6 +44,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
         root.after(2500, lambda: self.check_update(quiet=True))
+        root.after(300, self.startup_license)
 
     # ---------------- 設定 ----------------
     def load_cfg(self):
@@ -211,7 +213,12 @@ class App:
         uf.grid(row=len(checks) + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).pack(
             side="left")
-        keep = {lg, uf, mf, ef}   # 精簡介面時基本頁只留這幾區
+        af = ttk.LabelFrame(f1, text="授權", padding=6)
+        af.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.lic_label = ttk.Label(af, text="")
+        self.lic_label.pack(side="left")
+        ttk.Button(af, text="輸入序號", command=self.show_activate).pack(side="right")
+        keep = {lg, uf, mf, ef, af}   # 精簡介面時基本頁只留這幾區
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
@@ -456,8 +463,72 @@ class App:
         self.b_pause.config(state="disabled", text="‖ 暫停")
         self.b_stop.config(state="disabled")
 
+    # ---------------- 授權 ----------------
+    def refresh_license(self):
+        r = licensing.check()
+        self.lic = r
+        color = "#1a7f37" if r["ok"] and r["days_left"] > 3 else ("#c08000" if r["ok"] else "#c0392b")
+        txt = r["msg"] + ("　快到期了，記得續購" if r["ok"] and r["days_left"] <= 3 else "")
+        self.lic_label.config(text=txt, foreground=color)
+        return r
+
+    def startup_license(self):
+        r = self.refresh_license()
+        if not r["ok"]:
+            self.show_activate()
+
+    def show_activate(self):
+        win = tk.Toplevel(self.root)
+        win.title("輸入序號")
+        win.transient(self.root)
+        win.resizable(False, False)
+        fr = ttk.Frame(win, padding=14)
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="1. 把這台電腦的機器碼，連同付款人姓名寄給賣家：").grid(row=0, column=0,
+                                                                     columnspan=2, sticky="w")
+        mc = tk.StringVar(value=licensing.machine_code())
+        e = ttk.Entry(fr, textvariable=mc, width=26, font=("Consolas", 13), state="readonly")
+        e.grid(row=1, column=0, sticky="w", pady=(4, 10))
+
+        def copy_code():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(mc.get())
+            msg.config(text="已複製機器碼", foreground="#1a7f37")
+        ttk.Button(fr, text="複製", command=copy_code).grid(row=1, column=1, sticky="w", padx=6,
+                                                          pady=(4, 10))
+        ttk.Label(fr, text="2. 收到序號後貼在下面，按「啟用」：").grid(row=2, column=0, columnspan=2,
+                                                            sticky="w")
+        txt = tk.Text(fr, width=52, height=4, font=("Consolas", 10), wrap="char")
+        txt.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        msg = ttk.Label(fr, text=self.lic["msg"] if getattr(self, "lic", None) else "")
+        msg.grid(row=4, column=0, columnspan=2, sticky="w")
+
+        def do_activate():
+            key = txt.get("1.0", "end").strip()
+            if not key:
+                msg.config(text="請先貼上序號", foreground="#c0392b")
+                return
+            r = licensing.activate(key)
+            if r["ok"]:
+                self.refresh_license()
+                self.add_log("序號啟用成功：" + r["msg"])
+                messagebox.showinfo(APP_TITLE, "啟用成功！" + r["msg"], parent=win)
+                win.destroy()
+            else:
+                msg.config(text=r["msg"], foreground="#c0392b")
+        bf = ttk.Frame(fr)
+        bf.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(bf, text="啟用", command=do_activate).pack(side="right")
+        ttk.Button(bf, text="關閉", command=win.destroy).pack(side="right", padx=6)
+        txt.focus_set()
+        win.grab_set()
+
     def start(self):
         if self.thread and self.thread.is_alive():
+            return
+        if not self.refresh_license()["ok"]:
+            messagebox.showwarning(APP_TITLE, self.lic["msg"])
+            self.show_activate()
             return
         self.save_cfg(quiet=True)
         cfg = json.loads(json.dumps(self.cfg))

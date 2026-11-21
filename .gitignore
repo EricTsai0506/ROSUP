@@ -5,3 +5,7 @@ town_route.json
 build/
 dist/
 *.spec
+license.key
+license.state
+private_key.pem
+issued.csv

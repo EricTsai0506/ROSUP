@@ -18,7 +18,7 @@ FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 ASSET_EXE = "RoBot-win.zip"      # exe 版（GitHub 自動打包好的）
 ASSET_SRC = "RoBot-src.zip"      # 原始碼版（用 run.bat 執行的人）
-KEEP_FILES = ["bot_config.json", "town_route.json"]
+KEEP_FILES = ["bot_config.json", "town_route.json", "license.key", "license.state"]
 KEEP_DIRS = ["edge_profile", "logs"]
 
 

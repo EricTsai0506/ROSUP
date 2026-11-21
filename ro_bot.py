@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.0.6"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.0.7"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2840,6 +2840,16 @@ def run(cfg):
     global MOVER
     dry = cfg["dry_run"]
     CONTROL["dry"] = dry
+    try:
+        import licensing
+        _lic = licensing.check()
+    except Exception as e:
+        _lic = {"ok": False, "msg": f"授權檢查失敗：{e}"}
+    if not _lic["ok"]:
+        log(_lic["msg"])
+        return
+    log(_lic["msg"])
+    CONTROL["lic_next"] = time.time() + 600
     inp = Input(dry)
     log("模式：" + ("測試（只記錄、不操作）" if dry else "正式執行"))
     log("F8 暫停／繼續，F9 結束" + ("" if cfg.get("browser", {}).get("mode") == "cdp"
@@ -2941,6 +2951,13 @@ def run(cfg):
                 if hot.hit("F9") or CONTROL["stop"]:
                     log("停止")
                     break
+                if time.time() >= CONTROL.get("lic_next", 0):   # 每 10 分鐘確認一次授權
+                    CONTROL["lic_next"] = time.time() + 600
+                    _lic = licensing.check()
+                    if not _lic["ok"]:
+                        log(_lic["msg"] + " → 停止")
+                        MOVER.set(None, False)
+                        break
                 if hot.hit("F8") or CONTROL["toggle_pause"]:
                     CONTROL["toggle_pause"] = False
                     paused = not paused

@@ -3,12 +3,12 @@ chcp 65001 >nul
 cd /d "%~dp0"
 echo [1/3] Installing packages...
 python -m pip install --upgrade pip
-python -m pip install pyautogui opencv-python mss numpy rapidocr_onnxruntime websocket-client pyinstaller
+python -m pip install pyautogui opencv-python mss numpy rapidocr_onnxruntime websocket-client cryptography pyinstaller
 if errorlevel 1 goto fail
 
 echo [2/3] Building...
 python -m PyInstaller --noconfirm --clean --onedir --windowed --name RoBot ^
-  --collect-all rapidocr_onnxruntime --collect-binaries onnxruntime --hidden-import browser_cdp --hidden-import websocket --hidden-import updater gui.py
+  --collect-all rapidocr_onnxruntime --collect-binaries onnxruntime --hidden-import browser_cdp --hidden-import websocket --hidden-import updater --hidden-import licensing gui.py
 if errorlevel 1 goto fail
 
 echo [3/3] Copying files...
