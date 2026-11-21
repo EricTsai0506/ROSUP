@@ -1,0 +1,41 @@
+# 推上 v1.2.3 這種標籤時：在 GitHub 的 Windows 電腦上打包 exe，發布成新版本
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 檢查版本號
+        shell: python
+        run: |
+          import os, re
+          v = re.search(r'^VERSION = "([^"]+)"', open("ro_bot.py", encoding="utf-8").read(), re.M).group(1)
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("vV")
+          assert v == tag, f"ro_bot.py 的 VERSION={v} 跟標籤 {tag} 不一樣"
+      - name: 安裝套件
+        run: python -m pip install pyautogui opencv-python mss numpy rapidocr_onnxruntime==1.2.3 websocket-client pyinstaller
+      - name: 打包 exe
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name RoBot --collect-all rapidocr_onnxruntime --collect-binaries onnxruntime --hidden-import browser_cdp --hidden-import websocket --hidden-import updater gui.py
+      - name: 整理檔案
+        shell: pwsh
+        run: |
+          Remove-Item dist\RoBot\_internal\msvcp140*.dll -ErrorAction SilentlyContinue
+          Copy-Item bot_config.json dist\RoBot\
+          Copy-Item *.txt dist\RoBot\
+          Copy-Item templates dist\RoBot\templates -Recurse
+          Compress-Archive -Path dist\RoBot -DestinationPath RoBot-win.zip
+          git archive --format=zip -o RoBot-src.zip HEAD
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            RoBot-win.zip
+            RoBot-src.zip
+          body_path: RELEASE_NOTES.md

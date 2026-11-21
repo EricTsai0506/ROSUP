@@ -1,0 +1,240 @@
+{
+  "config_version": 11,
+  "window_title": "Edge",
+  "dry_run": false,
+  "debug_snapshots": true,
+  "levelup": {
+    "enabled": true,
+    "hotkey": "b",
+    "batch_min": 3,
+    "batch_max": 4,
+    "max_level": 0,
+    "stop_before_end_sec": 25,
+    "priority": [
+      "火箭術",
+      "冰箭術",
+      "雷擊術"
+    ],
+    "fourth_skill": "",
+    "banish_fourth": true,
+    "banish": [
+      "聖靈召喚",
+      "心靈爆破",
+      "火焰之壁",
+      "冰凍術",
+      "火狩",
+      "雷爆術",
+      "攻擊：屬性附加"
+    ],
+    "throwaway_until_level": 3,
+    "target_until_level": 11,
+    "target_words": [
+      "目標"
+    ],
+    "late_words": [
+      "傷害",
+      "冷卻"
+    ],
+    "rarity_first": true,
+    "avoid": [],
+    "max_reroll": 0,
+    "prefer_rarity": false,
+    "think_sec": [
+      0.15,
+      0.4
+    ]
+  },
+  "result": {
+    "enabled": true,
+    "button": "返回角色",
+    "think_sec": [
+      0.5,
+      1.0
+    ]
+  },
+  "lobby": {
+    "enabled": true,
+    "button": "單人大廳",
+    "think_sec": [
+      0.3,
+      0.7
+    ]
+  },
+  "town": {
+    "enabled": true,
+    "npc_name": "節慶主持人",
+    "npc_keyword": "主持人",
+    "talk_key": "space",
+    "npc_body_offset": 75,
+    "feet_offset": 40,
+    "talk_cooldown": 1.5,
+    "start_button": "開始遊戲",
+    "start_button_pos": [
+      0.786,
+      0.743
+    ],
+    "field_button": "前往野外"
+  },
+  "chest": {
+    "enabled": true,
+    "priority": [
+      "思想之神",
+      "處刑之神",
+      "戰爭之神",
+      "採集藥水",
+      "冷卻祝福",
+      "冷卻藥水",
+      "傷害祝福",
+      "傷害藥水",
+      "傷害靈藥",
+      "爆擊靈藥",
+      "爆擊傷害藥劑",
+      "詠唱藥水",
+      "詠唱靈藥",
+      "詠唱祝福",
+      "貪婪之神",
+      "力量之神",
+      "記憶之神",
+      "堡壘之神",
+      "疾風之神",
+      "生命之神",
+      "智慧之神",
+      "束縛之神",
+      "詭計之神",
+      "折磨之神",
+      "恢復藥水",
+      "生命藥水",
+      "護甲藥水",
+      "廣域藥水（範圍）",
+      "貪欲藥水",
+      "速度藥水",
+      "廣域藥水（近戰）",
+      "生命靈藥",
+      "驚奇靈藥",
+      "持續傷害藥劑",
+      "Flee（迴避）秘藥",
+      "廣域靈藥",
+      "護甲靈藥",
+      "恢復祝福",
+      "吸血祝福",
+      "雙倍投擲祝福",
+      "豐收祝福",
+      "廣域祝福（範圍）",
+      "廣域祝福（近戰）",
+      "睿智祝福",
+      "STR（力量）料理",
+      "AGI（敏捷）料理",
+      "VIT（體力）料理",
+      "INT（智力）料理",
+      "DEX（靈巧）料理",
+      "LUK（幸運）料理"
+    ],
+    "avoid": [],
+    "banish_avoid": false,
+    "max_reroll": 0,
+    "prefer_rarity": true,
+    "think_sec": [
+      0.2,
+      0.5
+    ]
+  },
+  "move": {
+    "enabled": true,
+    "mode": "keys",
+    "keys": {
+      "up": "w",
+      "down": "s",
+      "left": "a",
+      "right": "d"
+    },
+    "mouse_radius": 160,
+    "coin_weight": 1.0,
+    "ore_weight": 1.0,
+    "chest_timeout": 7,
+    "ore_hsv_low": [
+      100,
+      40,
+      135
+    ],
+    "ore_hsv_high": [
+      135,
+      135,
+      225
+    ],
+    "chest_threshold": 0.6,
+    "chest_scales": [
+      1.0
+    ],
+    "coin_hsv_low": [
+      16,
+      70,
+      90
+    ],
+    "coin_hsv_high": [
+      34,
+      255,
+      255
+    ],
+    "character_offset": [
+      0,
+      0
+    ],
+    "stuck_check": true
+  },
+  "browser": {
+    "mode": "cdp",
+    "url": "https://ro-survivors.com",
+    "port": 9229,
+    "edge_path": "",
+    "window_size": [
+      1280,
+      960
+    ]
+  },
+  "schedule": {
+    "enabled": false,
+    "games_min": 3,
+    "games_max": 5,
+    "rest_min_minutes": 10,
+    "rest_max_minutes": 20,
+    "stop_after_games": 0
+  },
+  "hud_ignore": [
+    [
+      0.0,
+      0.0,
+      0.28,
+      0.11
+    ],
+    [
+      0.4,
+      0.0,
+      0.6,
+      0.15
+    ],
+    [
+      0.69,
+      0.0,
+      1.0,
+      0.23
+    ],
+    [
+      0.38,
+      0.85,
+      0.62,
+      1.0
+    ]
+  ],
+  "coord_region": [
+    0.84,
+    0.0,
+    1.0,
+    0.07
+  ],
+  "menu_ocr_scale": 1.0,
+  "update": {
+    "repo": "EricTsai0506/ROSUP",
+    "token": "",
+    "check_on_start": true
+  }
+}

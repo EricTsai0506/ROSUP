@@ -1,0 +1,7 @@
+__pycache__/
+logs/
+edge_profile/
+town_route.json
+build/
+dist/
+*.spec
