@@ -10,6 +10,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -47,8 +48,16 @@ def check(repo, current, token=""):
         repo = repo[len("https://github.com/"):]
     if repo.count("/") != 1:
         raise ValueError("GitHub 儲存庫格式要是「帳號/名稱」，例如 lin05061/robot")
-    with _get(f"https://api.github.com/repos/{repo}/releases/latest", token) as r:
-        rel = json.load(r)
+    try:
+        with _get(f"https://api.github.com/repos/{repo}/releases/latest", token) as r:
+            rel = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError("找不到這個儲存庫或還沒有任何版本。如果儲存庫是私人的，"
+                               "請在「存取金鑰」填 GitHub 的唯讀金鑰") from None
+        if e.code in (401, 403):
+            raise RuntimeError("存取金鑰無效或已過期，或 GitHub 暫時限制查詢次數") from None
+        raise
     latest = rel.get("tag_name", "")
     if parse_ver(latest) <= parse_ver(current):
         return None
