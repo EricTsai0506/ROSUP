@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.3.4"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.3.5"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2593,7 +2593,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
                     tst["route_on"], tst["route_i"] = True, 0
                     log("出生點跟上次一樣 → 照記住的路線走")
                 else:
-                    log("出生點跟記住的不一樣 → 自己規劃路線")
+                    log(f"出生點跟記住的不一樣（差 {math.hypot(*off):.0f} 像素）→ 自己規劃路線")
             if tst.get("route_on"):
                 # 只校正「走路途中累積的誤差」（跟第一次看到時比），
                 # 名字標籤位置因文字大小改變造成的固定偏差不算進去
@@ -2762,6 +2762,26 @@ def town_step(frame, rect, cfg, inp, tst):
                 return _town_stuck(tst, now, world, step) or step
             tst["npc_w_reached"] = True
             tst["lost_logged"] = False
+        if npc_w is not None:
+            # 走到記得的位置還是看不到：繞著那個位置一圈一圈往外找（不要亂走到很遠）
+            if not tst.get("lost_logged"):
+                log(f"畫面上找不到{tc.get('npc_name', '節慶主持人')} → 在剛才看到的位置附近繞圈找")
+                tst["lost_logged"] = True
+                tst["spiral_t0"] = now
+            el = now - tst.get("spiral_t0", now)
+            rad = 60 + min(240, el * 12)                 # 半徑慢慢變大，最大 300 像素
+            ang = el * 0.9
+            wx, wy = tst.get("world", (0.0, 0.0))
+            gx, gy = npc_w[0] + rad * math.cos(ang) - wx, npc_w[1] + rad * math.sin(ang) - wy
+            gd = math.hypot(gx, gy) or 1
+            plan_path(frame, (lc[0] + gx, lc[1] + gy), start=lc)  # 更新障礙圖
+            sd = safe_key_dir((gx / gd, gy / gd), lc, blocked_screen, prefer=tst.get("key_dir"))
+            tst["key_dir"] = sd
+            if el > 25:                                  # 繞太久：回到記得的位置重新開始
+                tst["spiral_t0"] = now
+                tst["npc_w_reached"] = False
+            step = sd or (gx / gd, gy / gd)
+            return _town_stuck(tst, now, world, step) or step
         if not tst.get("lost_logged"):
             log(f"畫面上找不到{tc.get('npc_name', '節慶主持人')}，四處找找")
             tst["lost_logged"] = True
