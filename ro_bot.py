@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.3.3"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.3.4"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -3749,7 +3749,11 @@ def run(cfg):
                 wx, wy = bst["world"]
                 mm_ok = False
                 if mmap:
-                    mmap.update(frame, now, bst["world"], res.get("map_name"))
+                    # 地圖用「刷哪一關」的設定來分（讀小地圖標題的名字不一定讀得到）
+                    tcf_ = cfg["town"]
+                    mkey = tcf_.get("stage") if tcf_.get("mode") == "expedition" and tcf_.get("stage") \
+                        else "節慶主持人"
+                    mmap.update(frame, now, bst["world"], mkey)
                     mm_ok = not dry and mmap.ready(now)
                 # 頭目快出現（例如斐揚洞穴 13:40 之後）：停在原地，等鐘出現再躲；頭目死後倒數也不動
                 tcf = cfg["town"]

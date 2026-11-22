@@ -233,6 +233,7 @@ class MiniMap:
         self.seen = None
         self.wbins = np.zeros(4096, np.float32)   # 走得過去的顏色（走過的路、地上的掉落物）
         self.obins = np.zeros(4096, np.float32)   # 撞到過的顏色
+        self.bumpc = None                          # 每個位置撞到過幾次（跨場記住；小東西像燈籠、木桶小地圖上看不到）
         self.lut = None
         self.cover = None
         self.scale = None
@@ -286,6 +287,7 @@ class MiniMap:
             self.save()
         old_bg, old_seen, old_w, old_o = self.bg, self.seen, self.wbins, self.obins
         old_scale = (self.scale, self.scale_obs)
+        old_bump = self.bumpc
         same_size = old_bg is not None and old_bg.shape[:2] == (self.panel[0][3], self.panel[0][2])
         keep = self.name is None and same_size      # 名稱還沒讀到前學的，算這張地圖的
         self._clear_model()
@@ -299,6 +301,8 @@ class MiniMap:
                     self.bg, self.seen = bg.copy(), seen.copy()
                     self.wbins = z["wbins"].astype(np.float32)
                     self.obins = z["obins"].astype(np.float32)
+                    if "bumpc" in z.files and z["bumpc"].shape == bg.shape[:2]:
+                        self.bumpc = z["bumpc"].copy()
                     sc = float(z["scale"][0]) if "scale" in z.files else 0.0
                     if sc > 0:
                         self.scale, self.scale_obs = sc, [sc] * 5
@@ -316,6 +320,8 @@ class MiniMap:
                 self.seen |= old_seen
             self.wbins += old_w
             self.obins += old_o
+            if old_bump is not None and (self.bumpc is None or self.bumpc.shape == old_bump.shape):
+                self.bumpc = old_bump if self.bumpc is None else np.maximum(self.bumpc, old_bump)
             self.scale, self.scale_obs = old_scale
         self.lut = None
         self.dirty = True
@@ -327,8 +333,9 @@ class MiniMap:
             os.makedirs(self.dir, exist_ok=True)
             path = self._file(self.name)
             tmp = path + ".tmp.npz"
+            extra = {"bumpc": self.bumpc} if self.bumpc is not None and self.bumpc.shape == self.bg.shape[:2] else {}
             np.savez_compressed(tmp, bg=self.bg, seen=self.seen, wbins=self.wbins, obins=self.obins,
-                                scale=np.array([self.scale or 0.0], np.float32))
+                                scale=np.array([self.scale or 0.0], np.float32), **extra)
             os.replace(tmp, path)
             self.dirty = False
         except Exception as e:
@@ -475,7 +482,7 @@ class MiniMap:
             if old is not None:
                 dp = math.hypot(px - old[1], py - old[2])
                 dw = math.hypot(world[0] - old[3], world[1] - old[4])
-                if dp >= 5 and dw > 40:
+                if dp >= 5 and dw > 40 and 6 <= dw / dp <= 60:     # 不合理的值不算
                     self.scale_obs.append(dw / dp)
                     del self.scale_obs[:-25]
                     if len(self.scale_obs) >= 5:
@@ -500,6 +507,8 @@ class MiniMap:
         small = np.zeros(n, bool)
         small[1:] = st[1:, 4] <= 2
         obst = obst & ~small[lab]
+        if self.bumpc is not None and self.bumpc.shape == obst.shape:
+            obst = obst | (self.bumpc >= 2)        # 不同場撞到 2 次以上的地方 = 真的有東西擋著
         if self.block is not None:
             if self.block.shape == obst.shape:
                 obst = obst | (self.block > 0)
@@ -768,6 +777,13 @@ class MiniMap:
         if self.pos is None or now - self.pos_t > 1.0 or d is None or self.block is None:
             return
         H, W = self.block.shape
+        if self.bumpc is None or self.bumpc.shape != (H, W):
+            self.bumpc = np.zeros((H, W), np.uint8)
+        hit = np.zeros((H, W), np.uint8)
+        for k in (2.0, 3.0):
+            cv2.circle(hit, (int(round(self.pos[0] + d[0] * k)), int(round(self.pos[1] + d[1] * k))), 1, 1, -1)
+        self.bumpc = np.minimum(self.bumpc.astype(np.int16) + hit, 250).astype(np.uint8)
+        self.dirty = True
         blur = cv2.blur(self.bg, (3, 3)) if self.bg is not None else None
         for k in (2.0, 3.0, 4.5, 6.0):
             x, y = int(round(self.pos[0] + d[0] * k)), int(round(self.pos[1] + d[1] * k))
