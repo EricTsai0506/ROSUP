@@ -14,6 +14,9 @@ from tkinter import ttk, messagebox
 
 import ro_bot as rb
 import updater
+
+# 沒有線上更新的版本：程式資料夾裡有 no_update.flag 這個檔案
+NO_UPDATE = os.path.exists(os.path.join(rb.BASE_DIR, "no_update.flag"))
 import licensing
 
 APP_TITLE = "掛機小幫手"
@@ -45,7 +48,8 @@ class App:
         self.fill_from_cfg()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.poll)
-        root.after(2500, lambda: self.check_update(quiet=True))
+        if not NO_UPDATE:
+            root.after(2500, lambda: self.check_update(quiet=True))
         root.after(300, self.startup_license)
 
     # ---------------- 設定 ----------------
@@ -246,9 +250,10 @@ class App:
             ttk.Radiobutton(lg, text=f"第 {n} 格", value=n, variable=self.v_slot).grid(
                 row=2 + r_, column=c_, sticky="w", padx=(0, 8))
         uf = ttk.LabelFrame(f1, text=f"線上更新（目前版本 v{rb.VERSION}）", padding=6)
-        uf.grid(row=len(checks) + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).pack(
-            side="left")
+        if not NO_UPDATE:
+            uf.grid(row=len(checks) + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+            ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).pack(
+                side="left")
         af = ttk.LabelFrame(f1, text="授權", padding=6)
         af.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.lic_label = ttk.Label(af, text="")
@@ -712,6 +717,8 @@ class App:
 
     # ---------------- 線上更新 ----------------
     def check_update(self, quiet):
+        if NO_UPDATE:
+            return
         """quiet=True：開程式時自動檢查，沒新版或出錯都不吵你"""
         uc = dict(rb.DEFAULT_CONFIG["update"])
         uc.update(self.cfg.get("update", {}))

@@ -42,6 +42,9 @@ jobs:
           Copy-Item *.txt dist\RoBot\
           Copy-Item templates dist\RoBot\templates -Recurse
           Compress-Archive -Path dist\RoBot -DestinationPath RoBot-win.zip
+          Set-Content -Path dist\RoBot\no_update.flag -Value "沒有線上更新的版本"
+          Compress-Archive -Path dist\RoBot -DestinationPath RoBot-win-noupdate.zip
+          Remove-Item dist\RoBot\no_update.flag
           git archive --format=zip -o RoBot-src.zip HEAD
       - uses: softprops/action-gh-release@v2
         if: steps.ver.outputs.new == 'true'
@@ -51,5 +54,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             RoBot-win.zip
+            RoBot-win-noupdate.zip
             RoBot-src.zip
           body_path: RELEASE_NOTES.md

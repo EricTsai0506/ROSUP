@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.3.2"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.3.3"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -3354,9 +3354,7 @@ def stats_text():
     n = len(done)
     gph = n / max(act / 3600.0, 1e-6)
     avg = sum(g["dur"] for g in done) / n
-    bumps = sum(g["bumps"] for g in done) / n
-    return (f"{head}｜{n} 場｜每小時 {gph:.1f} 場｜平均每場 {int(avg // 60)}:{int(avg % 60):02d}"
-            f"｜每場撞牆 {bumps:.1f} 次")
+    return f"{head}｜{n} 場｜每小時 {gph:.1f} 場｜平均每場 {int(avg // 60)}:{int(avg % 60):02d}"
 
 
 def run(cfg):
