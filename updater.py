@@ -102,6 +102,40 @@ def download(info, token="", progress=None):
     raise RuntimeError(f"下載的檔案裡找不到 {marker}")
 
 
+PENDING = os.path.join(BASE_DIR, "update_pending.json")
+
+
+def can_write():
+    """程式資料夾能不能寫入（放在 Program Files、唯讀資料夾就不行）"""
+    try:
+        t = os.path.join(BASE_DIR, ".write_test")
+        with open(t, "w") as f:
+            f.write("ok")
+        os.remove(t)
+        return True
+    except OSError:
+        return False
+
+
+def mark_pending(version):
+    try:
+        with open(PENDING, "w", encoding="utf-8") as f:
+            json.dump({"to": version}, f)
+    except OSError:
+        pass
+
+
+def take_pending():
+    """重開後呼叫：回傳上次要更新到的版本（沒有就 None），並刪掉記錄"""
+    try:
+        with open(PENDING, encoding="utf-8") as f:
+            to = json.load(f).get("to")
+        os.remove(PENDING)
+        return to
+    except (OSError, ValueError):
+        return None
+
+
 def apply_and_restart(tmp, src):
     """寫一個小批次檔：等這個程式關掉 → 覆蓋新檔（保留設定）→ 重開。呼叫後要馬上結束程式。"""
     for name in KEEP_FILES:                      # 新版不要蓋掉自己的設定
@@ -121,12 +155,18 @@ def apply_and_restart(tmp, src):
         relaunch = f'start "" "{pyw}" "{os.path.join(BASE_DIR, "gui.py")}"'
     pid = os.getpid()
     bat = os.path.join(tmp, "apply_update.bat")
-    with open(bat, "w", encoding="utf-8") as f:
+    logdir = os.path.join(BASE_DIR, "logs")
+    os.makedirs(logdir, exist_ok=True)
+    ulog = os.path.join(logdir, "update.log")
+    # 批次檔用系統的編碼（中文 Windows 是 Big5），資料夾名稱有中文才不會壞掉；不用 chcp 65001
+    enc = "mbcs" if sys.platform == "win32" else "utf-8"
+    with open(bat, "w", encoding=enc, errors="replace") as f:
         f.write(f"""@echo off
-chcp 65001 >nul
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto wait)
-robocopy "{src}" "{BASE_DIR}" /E /R:5 /W:1 /NFL /NDL /NJH /NJS >nul
+echo ==== %date% %time% 更新到 {os.path.basename(src)} >> "{ulog}"
+robocopy "{src}" "{BASE_DIR}" /E /R:10 /W:1 /NFL /NDL /NP >> "{ulog}" 2>&1
+echo robocopy 結果代碼 %ERRORLEVEL%（0~7 = 成功，8 以上 = 失敗） >> "{ulog}"
 cd /d "{BASE_DIR}"
 {relaunch}
 (goto) 2>nul & rmdir /s /q "{tmp}"

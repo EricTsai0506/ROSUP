@@ -53,6 +53,7 @@ class App:
         root.after(100, self.poll)
         if not NO_UPDATE:
             root.after(2500, lambda: self.check_update(quiet=True))
+        root.after(1500, self.verify_update)
         root.after(300, self.startup_license)
 
     # ---------------- 設定 ----------------
@@ -273,6 +274,8 @@ class App:
             uf.grid(row=len(checks) + 3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
             ttk.Button(uf, text="檢查更新", command=lambda: self.check_update(quiet=False)).pack(
                 side="left")
+        self.upd_status = ttk.Label(uf, text="", foreground="#666")
+        self.upd_status.pack(side="left", padx=8)
         af = ttk.LabelFrame(f1, text="授權", padding=6)
         af.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.lic_label = ttk.Label(af, text="")
@@ -763,22 +766,48 @@ class App:
         token = uc.get("token", "")
         if not quiet:
             self.add_log("檢查更新中…")
+            self.set_upd("檢查中…（最多 15 秒）")
 
         def work():
             try:
                 info = updater.check(repo, rb.VERSION, token)
             except Exception as e:
                 if not quiet:
-                    self.root.after(0, lambda m=str(e): messagebox.showwarning(APP_TITLE, f"檢查更新失敗：{m}"))
+                    self.set_upd("檢查失敗")
+                    self.root.after(0, lambda m=str(e): messagebox.showwarning(
+                        APP_TITLE, f"檢查更新失敗：{m}\n\n（連不上 GitHub 時，可以到 Discord 下載新版手動解壓覆蓋）"))
                     self.q.put(f"檢查更新失敗：{e}")
                 return
             if info is None:
                 if not quiet:
+                    self.set_upd(f"已經是最新版 v{rb.VERSION}")
                     self.q.put(f"已經是最新版 v{rb.VERSION}")
                     self.root.after(0, lambda: messagebox.showinfo(APP_TITLE, f"已經是最新版 v{rb.VERSION}"))
                 return
             self.root.after(0, lambda: self.ask_update(info, token))
         threading.Thread(target=work, daemon=True).start()
+
+    def set_upd(self, text):
+        lb = getattr(self, "upd_status", None)
+        if lb is not None:
+            self.root.after(0, lambda: lb.configure(text=text))
+
+    def verify_update(self):
+        """上次按了更新 → 重開後確認真的換成新版了"""
+        to = updater.take_pending()
+        if not to:
+            return
+        if updater.parse_ver(rb.VERSION) >= updater.parse_ver(to):
+            self.add_log(f"已更新到 v{rb.VERSION}")
+            return
+        messagebox.showwarning(
+            APP_TITLE, f"更新沒有成功：現在還是 v{rb.VERSION}（要更新到 v{to}）。\n\n"
+                       "常見原因：\n"
+                       "・程式放在 Program Files、OneDrive 同步中之類不能寫入的資料夾\n"
+                       "・防毒軟體擋住了檔案覆蓋\n"
+                       "・有另一個掛機小幫手還開著\n\n"
+                       "請把整個資料夾搬到桌面或 D:\\ 再試，或下載新版手動解壓覆蓋。\n"
+                       "詳細記錄在 logs\\update.log")
 
     def ask_update(self, info, token):
         notes = info["notes"].strip() or "（沒有寫更新內容）"
@@ -791,6 +820,12 @@ class App:
         if self.thread and self.thread.is_alive():
             messagebox.showinfo(APP_TITLE, "程式正在執行中，請先按「停止」再更新。")
             return
+        if not updater.can_write():
+            messagebox.showwarning(
+                APP_TITLE, f"程式所在的資料夾不能寫入，沒辦法自動更新：\n{rb.BASE_DIR}\n\n"
+                           "請把整個資料夾搬到桌面或 D:\\ 之類的地方再按更新，"
+                           "或下載新版手動解壓覆蓋。")
+            return
         self.save_cfg(quiet=True)
         self.add_log(f"下載新版 v{info['version']}…")
         last = [-1]
@@ -800,6 +835,7 @@ class App:
             if pct // 10 != last[0]:
                 last[0] = pct // 10
                 self.q.put(f"  下載中 {pct}%")
+                self.set_upd(f"下載中 {pct}%")
 
         def work():
             try:
@@ -809,9 +845,11 @@ class App:
                 self.root.after(0, lambda m=str(e): messagebox.showwarning(APP_TITLE, f"下載失敗：{m}"))
                 return
             self.q.put("下載完成，關閉程式並換成新版…")
+            self.set_upd("下載完成，程式會關掉，幾秒後自動重開")
 
             def finish():
                 try:
+                    updater.mark_pending(info["version"])
                     updater.apply_and_restart(tmp, src)
                 except Exception as e:
                     messagebox.showwarning(APP_TITLE, f"更新失敗：{e}")
