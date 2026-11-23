@@ -244,9 +244,12 @@ class App:
             (self.v_loop, "自動循環（結算 → 大廳 → 主持人 → 開始遊戲 → 前往野外）"),
             (self.v_snap, "儲存除錯截圖到 logs"),
         ]
+        dodge_cb = None
         for r, (v, t) in enumerate(checks, start=1):
-            ttk.Checkbutton(f1, text=t, variable=v).grid(row=r, column=0, columnspan=2, sticky="w",
-                                                         pady=1)
+            cb_ = ttk.Checkbutton(f1, text=t, variable=v)
+            cb_.grid(row=r, column=0, columnspan=2, sticky="w", pady=1)
+            if v is self.v_dodge:
+                dodge_cb = cb_
         lg = ttk.LabelFrame(f1, text="自動登入（暫離彈窗→接受、首頁→開始遊戲、選角色→開始遊戲）",
                             padding=6)
         lg.grid(row=len(checks) + 2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -284,7 +287,7 @@ class App:
                      state="readonly", width=26).grid(row=1, column=1, sticky="w", padx=6, pady=2)
         ttk.Label(sf, text="遠征會走到遠征隊長、選關、出發；難度在按「前往野外」前調整",
                   foreground="#666").grid(row=2, column=0, columnspan=2, sticky="w")
-        keep = {lg, uf, mf, ef, af, sf}   # 精簡介面時基本頁只留這幾區
+        keep = {lg, uf, mf, ef, af, sf, dodge_cb}   # 精簡介面時基本頁只留這幾區（加上頭目閃避）
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
