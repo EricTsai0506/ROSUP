@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.7"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.8"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -180,6 +180,17 @@ _CHEST_RAW = [
         ("廣域祝福（近戰）", "+10% 近戰距離 → +20% 近戰距離（只限近戰流派）"),
         ("睿智祝福", "+10% EXP → +20% EXP"),
     ]),
+    ("神祇（技能）", [
+        ("火箭術", "+15% 傷害 · 火球術：每個投射物爆成火球，對周圍造成 30% 傷害（1.5 公尺，隨範圍成長）"),
+        ("冰箭術", "+15% 傷害 · 累積冰霜：每個投射物在敵人身上留下一層冰霜，累積 5 層時冰凍 2 秒"),
+        ("雷擊術", "+15% 傷害 · 連鎖閃電：每一發跳向附近 2 個敵人，造成 50% 傷害"),
+        ("聖靈召喚", "+15% 傷害 · 吸魂術：每用聖靈召喚擊殺一隻怪物獲得一層充能，再次施放時每層 +1 目標"),
+        ("心靈爆破", "+12% 範圍 · 念力連擊：打擊多重複 2 次並施加詛咒，被命中的敵人 4 秒內受到傷害提高 15%"),
+        ("火焰之壁", "+25% 持續時間 · 火柱：火牆熄滅時，每團火焰爆成火柱，對周圍造成 60% 傷害"),
+        ("冰凍術", "冰凍 +5 秒 · 冰凍爆發：目標在冰凍中死亡會爆裂，對周圍敵人造成其最大 HP 35% 的傷害"),
+        ("火狩", "+1 團火焰 · 火之獵殺：結束時火焰向外射出，命中時爆炸造成 150% 傷害"),
+        ("雷爆術", "+12% 範圍 · 怒雷強擊：風暴最後在整個區域釋放一次大放電，對所有敵人造成 150% 傷害"),
+    ]),
     ("料理", [
         ("STR（力量）料理", "+1 STR → +5 STR"),
         ("AGI（敏捷）料理", "+1 AGI → +5 AGI"),
@@ -194,7 +205,7 @@ CHEST_CATEGORY = {name: cat for cat, lst in _CHEST_RAW for name, _ in lst}
 
 
 # 預設排在最前面的寶箱（依序）
-CHEST_TOP = ["思想之神", "處刑之神", "戰爭之神", "採集藥水", "冷卻祝福", "冷卻藥水",
+CHEST_TOP = ["思想之神", "處刑之神", "戰爭之神", "火箭術", "冰箭術", "雷擊術", "採集藥水", "冷卻祝福", "冷卻藥水",
              "傷害祝福", "傷害藥水", "傷害靈藥", "爆擊靈藥", "爆擊傷害藥劑",
              "詠唱藥水", "詠唱靈藥", "詠唱祝福"]
 
@@ -221,7 +232,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 14,
+    "config_version": 15,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -307,6 +318,9 @@ DEFAULT_CONFIG = {
         "avoid": [],
         "banish_avoid": False,
         "max_reroll": 0,
+        "reroll_rank": 10,           # 卡片排名在前 N 名之外 → 按那張卡下面的「重抽」（0 = 不重抽）
+        "reroll_limit": 6,           # 每個寶箱選單最多重抽幾次
+        "banish_rank": 0,            # 卡片排名在前 N 名之外 → 按「放逐」（0 = 不放逐）；技能放逐完才會做
         "prefer_rarity": True,
         "auto": False,               # true = 寶箱直接按遊戲的「自動寶箱」（預設不按，照優先順序選）
         "think_sec": [0.2, 0.5],
@@ -413,7 +427,14 @@ def migrate_config(cfg, ver=None):
     if ver < 14:  # 技能、寶箱預設都不按遊戲的「自動」
         cfg["levelup"]["auto_after_banish"] = False
         cfg["chest"]["auto"] = False
-    cfg["config_version"] = 14
+    if ver < 15:  # 新增技能神祇：主力技能的排在第 4 名起，其他接在最後
+        have = list(cfg["chest"].get("priority", []))
+        main = [n for n in cfg["levelup"].get("priority", ["火箭術", "冰箭術", "雷擊術"])
+                if CHEST_CATEGORY.get(n) == "神祇（技能）" and n not in have]
+        have[3:3] = main
+        have += [n for n, _ in CHEST_ITEMS if CHEST_CATEGORY[n] == "神祇（技能）" and n not in have]
+        cfg["chest"]["priority"] = have
+    cfg["config_version"] = 15
     return cfg
 
 
@@ -1038,6 +1059,24 @@ def _banish_button(cl, rank, spacing_hint=None):
             "w": last["w"], "h": last["h"], "cx": cx, "cy": last["cy"], "estimated": True}
 
 
+def _reroll_button(cl, rank, spacing_hint=None):
+    """這張卡的『重抽』按鈕（三個按鈕最左邊那個）；沒讀到就用其他按鈕推算"""
+    for i in cl:
+        if rank(i) == 0:
+            return i
+    cl = sorted(cl, key=lambda i: i["cx"])
+    first = min(cl, key=rank)
+    if len(cl) >= 2 and rank(cl[-1]) != rank(cl[0]):
+        spacing = (cl[-1]["cx"] - cl[0]["cx"]) / (rank(cl[-1]) - rank(cl[0]))
+    elif spacing_hint:
+        spacing = spacing_hint
+    else:
+        spacing = max(first["w"] * 1.8, first["h"] * 3.2)
+    cx = first["cx"] - rank(first) * spacing
+    return {"text": "重抽", "n": "重抽", "x": cx - first["w"] / 2, "y": first["y"],
+            "w": first["w"], "h": first["h"], "cx": cx, "cy": first["cy"], "estimated": True}
+
+
 def find_cards(items, frame_h, frame=None, ox=0, oy=0):
     """以每張卡片下方那排按鈕（重抽／專注／放逐）為基準，找出卡片標題與稀有度。
     卡片直排（手機）或橫排（電腦）都適用。"""
@@ -1081,7 +1120,8 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
         x0 = min(i["x"] for i in cl)
         x1 = max(i["x"] + i["w"] for i in cl)
         cards.append({"cx": (x0 + x1) / 2, "cy": sum(i["cy"] for i in cl) / len(cl),
-                      "banish": _banish_button(cl, rank, spacing_hint)})
+                      "banish": _banish_button(cl, rank, spacing_hint),
+                      "reroll": _reroll_button(cl, rank, spacing_hint)})
 
     # 每張卡左右能涵蓋的範圍：同一排相鄰卡片距離的一半
     for c in cards:
@@ -1144,7 +1184,8 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
             if r is not None:
                 rarity = r
         lines = [i for i in g if i["cy"] > title["cy"] and not _is_button(i)]
-        out.append({"title": title, "rarity": rarity, "banish": c["banish"], "lines": lines})
+        out.append({"title": title, "rarity": rarity, "banish": c["banish"], "reroll": c["reroll"],
+                    "lines": lines})
     return out
 
 
@@ -1164,10 +1205,12 @@ def choose_card(cards, sec):
     for c in cards:
         s = c["rarity"] if sec.get("prefer_rarity", True) else 0
         c["pri"] = False
+        c["rank"] = None          # 在優先清單的第幾名（1 起算）；不在清單 = None
         for idx, kw in enumerate(sec.get("priority", [])):
             if chest_match(c, kw):
                 s += 1000 - 10 * idx
                 c["pri"] = True
+                c["rank"] = idx + 1
                 break
         c["avoid"] = any(match(c["title"]["text"], kw) for kw in sec.get("avoid", []))
         if c["avoid"]:
@@ -3043,7 +3086,8 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             GAME.update(fourth=None, slots=0, banish_off=False, banish_fail=0, last_banish=None,
                         levelups=0, attack_banished=False, fourth_banished=False,
                         fourth_ok=False, fourth_pick=None,
-                        auto_logged=False)
+                        auto_logged=False, chest_reroll_off=False, chest_reroll_fail=0,
+                        chest_banish_off=False, chest_banish_fail=0, chest_banish_wait_logged=False)
         time.sleep(random.uniform(0.8, 1.4))
         return True
 
@@ -3106,6 +3150,9 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
         return True
 
     best = choose_card(cards, sec)
+    if chest_rank_actions(cards, best, sec, inp, st, cfg.get("levelup", {})):
+        st["acted"] = True
+        return True
     if sec.get("banish_avoid") and st["banished"] < 3:
         bad = [c for c in cards if c["avoid"]]
         if bad:
@@ -3126,6 +3173,71 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
     pick_card(best, cards, items, inp, sec.get("number_keys", True))
     st["acted"] = True
     return True
+
+
+def skill_banish_done(cfg_lv):
+    """技能那邊該放逐的都放逐完了嗎（第四技能、攻擊：屬性附加）"""
+    if not cfg_lv.get("banish_fourth", True) and not cfg_lv.get("banish"):
+        return True
+    need_attack = any(k in ALWAYS_BANISH for k in cfg_lv.get("banish", []))
+    return bool(GAME.get("banish_off") or (GAME.get("fourth_banished")
+                                           and (GAME.get("attack_banished") or not need_attack)))
+
+
+def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
+    """寶箱：排名太後面的卡 → 放逐（技能放逐完之後才做）或 按那張卡的「重抽」。有動作回傳 True"""
+    def rk(c):
+        return c.get("rank") or 9999
+
+    def label(c):
+        return f"{c['title']['text']}（" + (f"第 {c['rank']} 名" if c.get("rank") else "不在清單") + "）"
+
+    sig = tuple(norm(c["title"]["text"]) for c in cards)
+    # 上次按了重抽／放逐，卡片卻完全沒變 → 次數可能用完了
+    la = st.get("chest_last")
+    if la and la["sig"] == sig and time.time() - la["t"] < 6:
+        GAME[la["kind"] + "_fail"] = GAME.get(la["kind"] + "_fail", 0) + 1
+        if GAME[la["kind"] + "_fail"] >= 2 and not GAME.get(la["kind"] + "_off"):
+            GAME[la["kind"] + "_off"] = True
+            log(f"  寶箱{'重抽' if la['kind'] == 'chest_reroll' else '放逐'}好像沒有作用（次數可能用完了），這局不再使用")
+    st["chest_last"] = None
+
+    # 1. 放逐：排名在前 N 名之外，而且技能那邊已經放逐完
+    br = int(sec.get("banish_rank", 0) or 0)
+    if br > 0 and not GAME.get("chest_banish_off"):
+        bad = [c for c in cards if rk(c) > br and c is not best]
+        if bad:
+            if not skill_banish_done(lv_sec or {}):
+                if not GAME.get("chest_banish_wait_logged"):
+                    GAME["chest_banish_wait_logged"] = True
+                    log("  寶箱有排名太後面的卡，但技能還沒放逐完 → 先不放逐寶箱")
+            else:
+                c = max(bad, key=rk)
+                b = c["banish"]
+                pos = inp.click_item(b, "放逐") or (round(b["cx"]), round(b["cy"]))
+                log(f"  寶箱放逐：{label(c)}，在前 {br} 名之外（點擊 {pos[0]},{pos[1]}"
+                    + ("，位置是推算的" if b.get("estimated") else "") + "）")
+                st["chest_last"] = {"sig": sig, "t": time.time(), "kind": "chest_banish"}
+                GAME["chest_banishes"] = GAME.get("chest_banishes", 0) + 1
+                return True
+
+    # 2. 重抽：三張卡裡有排名在前 N 名之外的 → 按那張卡的「重抽」（三張都在前 N 名就直接選）
+    rr = int(sec.get("reroll_rank", 0) or 0)
+    if rr > 0 and not GAME.get("chest_reroll_off") \
+            and st.get("card_rerolls", 0) < int(sec.get("reroll_limit", 6) or 0):
+        bad = [c for c in cards if rk(c) > rr and c is not best]
+        if rk(best) > rr:
+            bad.append(best)        # 連最好的都在前 N 名之外 → 也重抽
+        if bad:
+            c = max(bad, key=rk)
+            b = c["reroll"]
+            pos = inp.click_item(b, "重抽") or (round(b["cx"]), round(b["cy"]))
+            st["card_rerolls"] = st.get("card_rerolls", 0) + 1
+            log(f"  寶箱重抽：{label(c)}，在前 {rr} 名之外（點擊 {pos[0]},{pos[1]}"
+                + ("，位置是推算的" if b.get("estimated") else "") + "）")
+            st["chest_last"] = {"sig": sig, "t": time.time(), "kind": "chest_reroll"}
+            return True
+    return False
 
 
 def _is_empty_slot(i):
@@ -3401,7 +3513,7 @@ def process_menus(kind, sct, rect, cfg, inp, st, dry):
             # 選完後等一下就讀下一張；是不是新的一組卡，由內容（Lv、卡片名稱）判斷，
             # 不比對像素（卡片的光暈、流光動畫會讓像素一直變）
             time.sleep(0.45 if ACTION.get("kind") == "click" else 0.3)
-    st.update(rerolls=0, banished=0, first=True)
+    st.update(rerolls=0, banished=0, first=True, card_rerolls=0, chest_last=None)
 
 
 def _menu_sig_img(frame):
@@ -3732,7 +3844,7 @@ def run(cfg):
                             watcher.res["ingame_t"] = 0  # 已離開戰鬥
                     continue
                 if not res["kind"] and res["t"] > menu_done_t:
-                    menu_st.update(rerolls=0, banished=0)
+                    menu_st.update(rerolls=0, banished=0, card_rerolls=0, chest_last=None)
 
                 # ---- 升級按鈕 ----
                 lvc = cfg["levelup"]

@@ -137,6 +137,11 @@ class App:
         c["chest"]["enabled"] = self.v_chest.get()
         c["chest"]["priority"] = list(self.chest_order)
         c["chest"]["prefer_rarity"] = self.v_chest_rarity.get()
+        for key_, var_ in (("reroll_rank", self.v_chest_rr), ("banish_rank", self.v_chest_br)):
+            try:
+                c["chest"][key_] = max(0, int(var_.get()))
+            except ValueError:
+                pass
         c["move"]["enabled"] = self.v_move.get()
         c["move"]["boss_dodge"] = self.v_dodge.get()
         loop = self.v_loop.get()
@@ -352,7 +357,7 @@ class App:
         ttk.Checkbutton(f2, text="卡片等級（普通<優良<稀有<史詩<傳說）最優先，同等級再看效果",
                         variable=self.v_rarity).grid(row=3, column=0, columnspan=2, sticky="w",
                                                      pady=4)
-        ttk.Label(f2, text="勾放逐的技能會先選一次當第四技能，下次出現才放逐（攻擊：屬性附加 出現就直接放逐）",
+        ttk.Label(f2, text="勾放逐的技能會先選一次當第四技能，確認選到後才開始放逐（攻擊：屬性附加 也等第四技能選到才放逐）",
                   foreground="#666").grid(row=4, column=0, columnspan=2, sticky="w")
 
         # 寶箱
@@ -382,6 +387,17 @@ class App:
         self.v_chest_auto = tk.BooleanVar()
         ttk.Checkbutton(f4, text="寶箱自動：直接按遊戲的「自動寶箱」（不勾 = 照上面的優先順序選）",
                         variable=self.v_chest_auto).grid(row=3, column=0, columnspan=2, sticky="w")
+        rbf = ttk.Frame(f4)
+        rbf.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.v_chest_rr = tk.StringVar()
+        self.v_chest_br = tk.StringVar()
+        ttk.Label(rbf, text="排名在前").grid(row=0, column=0, sticky="w")
+        ttk.Spinbox(rbf, from_=0, to=99, width=4, textvariable=self.v_chest_rr).grid(row=0, column=1)
+        ttk.Label(rbf, text="名之外的卡 → 按那張卡的「重抽」（0 = 不重抽）").grid(row=0, column=2, sticky="w")
+        ttk.Label(rbf, text="排名在前").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(rbf, from_=0, to=99, width=4, textvariable=self.v_chest_br).grid(row=1, column=1)
+        ttk.Label(rbf, text="名之外的卡 → 按「放逐」（0 = 不放逐；技能放逐完才會做）").grid(
+            row=1, column=2, sticky="w")
         ttk.Checkbutton(f4, text="清單以外的寶箱，選卡片等級高的（普通<優良<稀有<史詩<傳說）",
                         variable=self.v_chest_rarity).grid(row=2, column=0, columnspan=2,
                                                            sticky="w")
@@ -476,6 +492,8 @@ class App:
         self.chest_order = order + [n for n in names if n not in order]
         self.show_chest()
         self.v_chest_rarity.set(c["chest"].get("prefer_rarity", True))
+        self.v_chest_rr.set(str(c["chest"].get("reroll_rank", 10)))
+        self.v_chest_br.set(str(c["chest"].get("banish_rank", 0)))
         pri = c["levelup"].get("priority", [])
         ban = c["levelup"].get("banish", [])
         for n in SKILLS:
