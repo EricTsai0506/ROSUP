@@ -100,6 +100,34 @@ def launch_browser(exe, url, port, profile_dir, size=(1280, 960), log=print):
     return False
 
 
+def close_browser(port, timeout=15.0):
+    """關掉遊戲用的 Edge（整個瀏覽器，只有遊戲專用的那個設定檔）。關掉了回傳 True"""
+    try:
+        import websocket
+        info = _http_json(port, "/json/version")
+        ws = websocket.create_connection(info["webSocketDebuggerUrl"], timeout=5,
+                                         suppress_origin=True)
+        try:
+            ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+            try:
+                ws.recv()
+            except Exception:
+                pass
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    end = time.time() + timeout
+    while time.time() < end:
+        if not port_alive(port):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def open_settings(exe, profile_dir, page="edge://settings/system"):
     """在遊戲專用的 Edge 開設定頁（關掉效率模式用）"""
     if not exe:

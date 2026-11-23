@@ -98,6 +98,10 @@ class App:
         c["window_title"] = self.v_title.get().strip()
         c.setdefault("browser", {})["mode"] = self.v_mode.get() or "cdp"
         c["browser"]["lock_window_size"] = self.v_lockwin.get()
+        try:
+            c["browser"]["restart_hours"] = max(0.0, float(self.v_restart.get() or 0))
+        except ValueError:
+            pass
         c["dry_run"] = self.v_dry.get()
         c["levelup"]["enabled"] = self.v_lv.get()
         # 勾選的技能（主力依清單順序）＋設定檔裡清單以外的名稱照舊保留
@@ -136,9 +140,12 @@ class App:
         if sch.get("rest_max_minutes", 0) < sch.get("rest_min_minutes", 0):
             sch["rest_max_minutes"] = sch["rest_min_minutes"]
         c["chest"]["enabled"] = self.v_chest.get()
-        c["chest"]["priority"] = list(self.chest_order)
+        self._sync_late()
+        c["chest"]["priority"] = list(self.chest_lists["early"])
+        c["chest"]["priority_late"] = list(self.chest_lists["late"]) if self.late_custom else []
         c["chest"]["prefer_rarity"] = self.v_chest_rarity.get()
-        for key_, var_ in (("reroll_rank", self.v_chest_rr), ("banish_rank", self.v_chest_br)):
+        for key_, var_ in (("reroll_rank", self.v_chest_rr), ("banish_rank", self.v_chest_br),
+                           ("focus_rank", self.v_chest_fr), ("late_from", self.v_chest_late)):
             try:
                 c["chest"][key_] = max(0, int(var_.get()))
             except ValueError:
@@ -201,6 +208,7 @@ class App:
         srow.pack(fill="x", padx=12, pady=(0, 2))
         ttk.Button(srow, text="加入 Discord 社群", command=lambda: webbrowser.open(DISCORD_URL)).pack(
             side="right")
+        ttk.Button(srow, text="今日報表", command=self.open_report).pack(side="right", padx=4)
         self.stats_lbl = ttk.Label(srow, text=rb.stats_text(), foreground="#444")
         self.stats_lbl.pack(side="left", fill="x", expand=True)
         self.stats_next = 0
@@ -224,22 +232,29 @@ class App:
         f1.columnconfigure(1, weight=1)
         self.v_mode = tk.StringVar()
         mf = ttk.Frame(f1)
-        mf.grid(row=10, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        mf.grid(row=11, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(mf, text="操作方式：").pack(side="left")
         ttk.Radiobutton(mf, text="背景（推薦，可同時用其他視窗）", value="cdp",
                         variable=self.v_mode).pack(side="left")
         ttk.Radiobutton(mf, text="前景（模擬鍵盤滑鼠）", value="screen",
                         variable=self.v_mode).pack(side="left", padx=6)
         ef = ttk.Frame(f1)
-        ef.grid(row=11, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ef.grid(row=12, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Button(ef, text="開啟遊戲用的 Edge", command=self.open_game_edge).pack(side="left")
         ttk.Button(ef, text="Edge 效能設定", command=self.open_edge_settings).pack(side="left",
                                                                               padx=4)
         ttk.Label(ef, text="第一次請在裡面登入遊戲；不要縮到最小",
                   foreground="#666").pack(side="left", padx=6)
+        self.v_restart = tk.StringVar()
+        rsf = ttk.Frame(f1)
+        rsf.grid(row=16, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(rsf, text="背景模式：每").pack(side="left")
+        ttk.Spinbox(rsf, from_=0, to=48, width=4, textvariable=self.v_restart).pack(side="left", padx=2)
+        ttk.Label(rsf, text="小時重開一次遊戲用的 Edge（一局打完時；需要開自動登入；0 = 不重開）").pack(
+            side="left")
         self.v_lockwin = tk.BooleanVar()
         ttk.Checkbutton(f1, text="背景模式：固定遊戲視窗大小 1280×960（被縮小時自動還原）",
-                        variable=self.v_lockwin).grid(row=12, column=0, columnspan=2,
+                        variable=self.v_lockwin).grid(row=13, column=0, columnspan=2,
                                                       sticky="w", pady=(4, 0))
         checks = [
             (self.v_dry, "測試模式（只辨識、不操作）"),
@@ -277,12 +292,12 @@ class App:
         self.upd_status = ttk.Label(uf, text="", foreground="#666")
         self.upd_status.pack(side="left", padx=8)
         af = ttk.LabelFrame(f1, text="授權", padding=6)
-        af.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        af.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.lic_label = ttk.Label(af, text="")
         self.lic_label.pack(side="left")
         ttk.Button(af, text="輸入序號", command=self.show_activate).pack(side="right")
         sf = ttk.LabelFrame(f1, text="刷哪一關", padding=6)
-        sf.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        sf.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.STAGE_CHOICES = ["節慶主持人（原本的關卡）"] + [f"遠征：{x}" for x in rb.EXPEDITION_STAGES]
         self.DIFF_CHOICES = {"keep": "不調整（照遊戲目前的設定）", "min": "最簡單", "max": "最難"}
         self.v_stage = tk.StringVar(value=self.STAGE_CHOICES[0])
@@ -295,7 +310,7 @@ class App:
                      state="readonly", width=26).grid(row=1, column=1, sticky="w", padx=6, pady=2)
         ttk.Label(sf, text="遠征會走到遠征隊長、選關、出發；難度在按「前往野外」前調整",
                   foreground="#666").grid(row=2, column=0, columnspan=2, sticky="w")
-        keep = {lg, uf, mf, ef, af, sf, dodge_cb}   # 精簡介面時基本頁只留這幾區（加上頭目閃避）
+        keep = {lg, uf, mf, ef, af, sf, dodge_cb, rsf}   # 精簡介面時基本頁只留這幾區（加上頭目閃避）
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
@@ -367,8 +382,14 @@ class App:
         f4 = ttk.Frame(nb, padding=8)
         nb.add(f4, text="寶箱")
         self.v_chest_rarity = tk.BooleanVar()
-        ttk.Label(f4, text="寶箱的優先順序（越上面越優先選）：用滑鼠拖曳，或選一項後按右邊按鈕",
-                  ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.v_chest_phase = tk.StringVar(value="early")
+        phf = ttk.Frame(f4)
+        phf.grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(phf, text="寶箱的優先順序（越上面越優先；拖曳或用右邊按鈕排）　正在編輯：").pack(side="left")
+        ttk.Radiobutton(phf, text="前期排名", value="early", variable=self.v_chest_phase,
+                        command=self.switch_chest_phase).pack(side="left")
+        ttk.Radiobutton(phf, text="後期排名", value="late", variable=self.v_chest_phase,
+                        command=self.switch_chest_phase).pack(side="left", padx=4)
         lf2 = ttk.Frame(f4)
         lf2.grid(row=1, column=0, sticky="nsew", pady=4)
         f4.columnconfigure(0, weight=1)
@@ -401,6 +422,18 @@ class App:
         ttk.Spinbox(rbf, from_=0, to=99, width=4, textvariable=self.v_chest_br).grid(row=1, column=1)
         ttk.Label(rbf, text="名之外的卡 → 按「放逐」（0 = 不放逐；技能放逐完才會做）").grid(
             row=1, column=2, sticky="w")
+        self.v_chest_fr = tk.StringVar()
+        ttk.Label(rbf, text="排名在前").grid(row=2, column=0, sticky="w")
+        ttk.Spinbox(rbf, from_=0, to=99, width=4, textvariable=self.v_chest_fr).grid(row=2, column=1)
+        ttk.Label(rbf, text="名的卡 → 先按「專注」再選（之後更常出現；每種每局一次，0 = 不用）").grid(
+            row=2, column=2, sticky="w")
+        self.v_chest_late = tk.StringVar()
+        ttk.Label(rbf, text="遊戲時間第").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(rbf, from_=0, to=20, width=4, textvariable=self.v_chest_late).grid(row=3, column=1)
+        ltf = ttk.Frame(rbf)
+        ltf.grid(row=3, column=2, sticky="w")
+        ttk.Label(ltf, text="分鐘起改用「後期排名」（0 = 不分前後期）").pack(side="left")
+        ttk.Button(ltf, text="後期排名重設成跟前期一樣", command=self.reset_late).pack(side="left", padx=6)
         ttk.Checkbutton(f4, text="清單以外的寶箱，選卡片等級高的（普通<優良<稀有<史詩<傳說）",
                         variable=self.v_chest_rarity).grid(row=2, column=0, columnspan=2,
                                                            sticky="w")
@@ -475,6 +508,7 @@ class App:
         self.v_title.set(c.get("window_title", ""))
         self.v_mode.set(c.get("browser", {}).get("mode", "screen"))
         self.v_lockwin.set(c.get("browser", {}).get("lock_window_size", True))
+        self.v_restart.set(f'{float(c.get("browser", {}).get("restart_hours", 6)):g}')
         self.v_dry.set(c.get("dry_run", False))
         self.v_lv.set(c["levelup"]["enabled"])
         self.v_chest.set(c["chest"]["enabled"])
@@ -492,11 +526,18 @@ class App:
         self.v_snap.set(c.get("debug_snapshots", True))
         names = [n for n, _ in rb.CHEST_ITEMS]
         order = [x for x in c["chest"].get("priority", []) if x]
-        self.chest_order = order + [n for n in names if n not in order]
+        early = order + [n for n in names if n not in order]
+        late = [x for x in (c["chest"].get("priority_late") or []) if x]
+        self.late_custom = bool(late)
+        late = (late + [n for n in early if n not in late]) if late else list(early)
+        self.chest_lists = {"early": early, "late": late}
+        self.v_chest_phase.set("early")
         self.show_chest()
         self.v_chest_rarity.set(c["chest"].get("prefer_rarity", True))
         self.v_chest_rr.set(str(c["chest"].get("reroll_rank", 10)))
         self.v_chest_br.set(str(c["chest"].get("banish_rank", 0)))
+        self.v_chest_fr.set(str(c["chest"].get("focus_rank", 3)))
+        self.v_chest_late.set(str(c["chest"].get("late_from", 7)))
         pri = c["levelup"].get("priority", [])
         ban = c["levelup"].get("banish", [])
         for n in SKILLS:
@@ -672,6 +713,30 @@ class App:
             break
         rb.log("已停止")
 
+    @property
+    def chest_order(self):
+        """清單上正在編輯的那一份（前期或後期排名）"""
+        return self.chest_lists[self.v_chest_phase.get()]
+
+    def _sync_late(self):
+        # 後期排名沒有自己改過 → 一直跟前期一樣
+        if not self.late_custom:
+            self.chest_lists["late"] = list(self.chest_lists["early"])
+
+    def _touch(self):
+        if self.v_chest_phase.get() == "late":
+            self.late_custom = True
+
+    def switch_chest_phase(self):
+        self._sync_late()
+        self.show_chest()
+
+    def reset_late(self):
+        self.late_custom = False
+        self._sync_late()
+        self.show_chest()
+        self.add_log("後期排名已重設成跟前期一樣")
+
     def show_chest(self, select=None):
         top = self.lb_chest.yview()[0]
         self.lb_chest.delete(0, "end")
@@ -692,6 +757,7 @@ class App:
         j = self.lb_chest.nearest(e.y)
         if i is None or j == i or j < 0:
             return
+        self._touch()
         item = self.chest_order.pop(i)
         self.chest_order.insert(j, item)
         self._drag_i = j
@@ -702,6 +768,7 @@ class App:
         if not sel:
             return
         i = sel[0]
+        self._touch()
         item = self.chest_order.pop(i)
         if how == "top":
             j = 0
@@ -711,6 +778,27 @@ class App:
             j = min(max(0, i + how), len(self.chest_order))
         self.chest_order.insert(j, item)
         self.show_chest(j)
+
+    def open_report(self):
+        """打開今天的掛機報表（每打完一場自動更新）；今天還沒有就開最近一天的"""
+        try:
+            fs = sorted(f for f in os.listdir(rb.LOG_DIR) if f.startswith("report_") and f.endswith(".txt"))
+        except Exception:
+            fs = []
+        today = time.strftime("report_%Y%m%d.txt")
+        name = today if today in fs else (fs[-1] if fs else None)
+        if not name:
+            messagebox.showinfo(APP_TITLE, "還沒有報表：每打完一場會自動記錄，\n"
+                                           "存在 logs 資料夾的 report_日期.txt（摘要）和 report_日期.csv（每場明細）")
+            return
+        path = os.path.join(rb.LOG_DIR, name)
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"打不開報表：{e}\n檔案在 {path}")
 
     def open_game_edge(self):
         self.save_cfg(quiet=True)

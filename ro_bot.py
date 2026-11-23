@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.5.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -332,6 +332,9 @@ DEFAULT_CONFIG = {
         "max_reroll": 0,
         "reroll_rank": 10,           # 卡片排名在前 N 名之外 → 按那張卡下面的「重抽」（0 = 不重抽）
         "reroll_limit": 6,           # 每個寶箱選單最多重抽幾次
+        "focus_rank": 3,             # 排名前 N 名的寶箱先按「專注」再選（之後更常出現）；0 = 不用
+        "priority_late": [],         # 後期排名（空的 = 跟前期一樣）
+        "late_from": 7,              # 遊戲時間第幾分鐘起改用後期排名（0 = 不分前後期）
         "new_item_rank": 10,         # 道具欄還沒滿時，新道具要在前 N 名內才拿（新道具會永久佔一格）；0 = 不限制
         "banish_rank": 0,            # 卡片排名在前 N 名之外 → 按「放逐」（0 = 不放逐）；技能放逐完才會做
         "prefer_rarity": True,
@@ -380,6 +383,7 @@ DEFAULT_CONFIG = {
         "edge_path": "",
         "window_size": [1280, 960],
         "lock_window_size": True,
+        "restart_hours": 6,          # 背景模式：每幾小時重開一次遊戲用的 Edge（一局打完時；0 = 不重開）
     },
     "schedule": {
         "enabled": False,
@@ -462,8 +466,11 @@ def migrate_config(cfg, ver=None):
         cfg["move"]["boss_times"] = [150, 330, 450, 630, 750, 840]   # 依實際紀錄調整頭目出現時間
     if ver < 17:  # 遊戲把「靈藥」改名「秘藥」（卡片上是「驚奇秘藥」「生命秘藥」）
         ren = RENAMED_17
-        for key in ("priority", "avoid"):
-            cfg["chest"][key] = [ren.get(n, n) for n in cfg["chest"].get(key, [])]
+        for key in ("priority", "avoid", "priority_late"):
+            cfg["chest"][key] = [ren.get(n, n) for n in cfg["chest"].get(key, []) or []]
+    late = [n for n in (cfg["chest"].get("priority_late") or []) if n]
+    if late:    # 後期排名缺的項目（新增的道具）接在最後面
+        cfg["chest"]["priority_late"] = late + [n for n in cfg["chest"].get("priority", []) if n not in late]
     cfg["config_version"] = 17
     return cfg
 
@@ -953,6 +960,45 @@ def stage_of(text):
     return best if score >= 0.6 else None
 
 
+def stage_in(text):
+    """這行字裡是哪一個遠征關卡：允許前後多字（「普隆德拉原野 Lv 30」「已通過」），
+    也允許讀錯一兩個字；兩個關卡一樣像（例如只讀到「普隆德拉」）就回傳 None"""
+    import difflib
+    n = re.sub(r"[^\u4e00-\u9fff]", "", norm(text))
+    if len(n) < 2:
+        return None
+    sc = []
+    for st_ in EXPEDITION_STAGES:
+        k = norm(st_)
+        if k in n:
+            sc.append((1.0 + len(k) / 100, st_))      # 完整包含：越長越準（地下水道 > 原野）
+            continue
+        best = 0.0
+        L = len(k)
+        for i in range(0, max(1, len(n) - L + 2)):
+            best = max(best, difflib.SequenceMatcher(None, n[i:i + L + 1], k).ratio())
+        sc.append((best, st_))
+    sc.sort(reverse=True)
+    if sc[0][0] >= 0.7 and (len(sc) == 1 or sc[0][0] > sc[1][0] + 0.1):
+        return sc[0][1]
+    return None
+
+
+def _rows_joined(items):
+    """同一列、靠在一起的字接起來（關卡名稱有時被拆成兩段讀）"""
+    out = []
+    for i in sorted(items, key=lambda i: (round(i["cy"] / 12), i["x"])):
+        if out and abs(out[-1]["cy"] - i["cy"]) < i["h"] * 0.6 and \
+                0 <= i["x"] - (out[-1]["x"] + out[-1]["w"]) < i["h"] * 1.5:
+            o = out[-1]
+            x0, x1 = min(o["x"], i["x"]), max(o["x"] + o["w"], i["x"] + i["w"])
+            out[-1] = dict(o, text=o["text"] + i["text"], n=o["n"] + i["n"], x=x0, w=x1 - x0,
+                           cx=(x0 + x1) / 2)
+        else:
+            out.append(dict(i))
+    return out
+
+
 MAP_NAMES = ["洛陽", "斐揚洞穴", "普隆德拉地下水道", "失事輪甲板", "普隆德拉原野", "柏伊亞嵐神殿",
              "斐揚森林", "普隆德拉城"]
 
@@ -1137,10 +1183,10 @@ def _banish_button(cl, rank, spacing_hint=None):
             "w": last["w"], "h": last["h"], "cx": cx, "cy": last["cy"], "estimated": True}
 
 
-def _reroll_button(cl, rank, spacing_hint=None):
-    """這張卡的『重抽』按鈕（三個按鈕最左邊那個）；沒讀到就用其他按鈕推算"""
+def _reroll_button(cl, rank, spacing_hint=None, want=0, label="重抽"):
+    """這張卡的『重抽』（want=0）或『專注』（want=1）按鈕；沒讀到就用其他按鈕推算"""
     for i in cl:
-        if rank(i) == 0:
+        if rank(i) == want:
             return i
     cl = sorted(cl, key=lambda i: i["cx"])
     first = min(cl, key=rank)
@@ -1150,8 +1196,8 @@ def _reroll_button(cl, rank, spacing_hint=None):
         spacing = spacing_hint
     else:
         spacing = max(first["w"] * 1.8, first["h"] * 3.2)
-    cx = first["cx"] - rank(first) * spacing
-    return {"text": "重抽", "n": "重抽", "x": cx - first["w"] / 2, "y": first["y"],
+    cx = first["cx"] + (want - rank(first)) * spacing
+    return {"text": label, "n": label, "x": cx - first["w"] / 2, "y": first["y"],
             "w": first["w"], "h": first["h"], "cx": cx, "cy": first["cy"], "estimated": True}
 
 
@@ -1199,7 +1245,8 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
         x1 = max(i["x"] + i["w"] for i in cl)
         cards.append({"cx": (x0 + x1) / 2, "cy": sum(i["cy"] for i in cl) / len(cl),
                       "banish": _banish_button(cl, rank, spacing_hint),
-                      "reroll": _reroll_button(cl, rank, spacing_hint)})
+                      "reroll": _reroll_button(cl, rank, spacing_hint),
+                      "focus": _reroll_button(cl, rank, spacing_hint, 1, "專注")})
 
     # 每張卡左右能涵蓋的範圍：同一排相鄰卡片距離的一半
     for c in cards:
@@ -1267,6 +1314,7 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
         if en and canon_skill(title["text"]) != en:
             title = dict(title, text=en, n=norm(en))
         out.append({"title": title, "rarity": rarity, "banish": c["banish"], "reroll": c["reroll"],
+                    "focus": c["focus"],
                     "lines": lines, "en": en})
     return out
 
@@ -1293,6 +1341,21 @@ def chest_identify(c):
         if norm(kw) in txt:
             return name
     return None
+
+
+def chest_priority(sec):
+    """寶箱目前要用的優先清單：遊戲時間到了 late_from 分鐘、而且有設定後期排名 → 用後期排名"""
+    late = [x for x in (sec.get("priority_late") or []) if x]
+    try:
+        lf = float(sec.get("late_from", 0) or 0)
+    except (TypeError, ValueError):
+        lf = 0
+    if late and lf > 0 and GAME.get("max_timer", 0) >= lf * 60:
+        if not GAME.get("late_logged"):
+            GAME["late_logged"] = True
+            log(f"遊戲時間過了 {lf:g} 分鐘 → 寶箱改用後期排名（前 3 名：{'、'.join(late[:3])}）")
+        return late
+    return sec.get("priority", [])
 
 
 def choose_card(cards, sec, item_slots=None):
@@ -1515,6 +1578,11 @@ class Mover(threading.Thread):
             except FailSafe:
                 self.stop_flag = True
                 break
+            except Exception:
+                # 和 Edge 的連線暫時斷掉（例如定時重開 Edge）：當成按鍵都放開了，等一下再繼續
+                self.held.clear()
+                self.mouse_held = False
+                time.sleep(0.3)
             time.sleep(random.uniform(0.03, 0.06))
         try:
             self.release()
@@ -2036,6 +2104,78 @@ def dump_end_ring(cfg, result_frame=None):
         log(f"結束前截圖存檔失敗：{e}")
     finally:
         END_RING.clear()
+
+
+# =====================================================================
+#  每日報表（logs\report_日期.txt / .csv）
+# =====================================================================
+def report_hp(hp):
+    """每次讀到 HP：記這局最低 HP%，頭目在場時記頭目戰的最低 HP%"""
+    if not hp or not hp[1]:
+        return
+    pct = hp[0] / hp[1]
+    if GAME.get("hp_min_pct") is None or pct < GAME["hp_min_pct"]:
+        GAME["hp_min_pct"] = pct
+    b = GAME.get("boss_cur")
+    if b is not None:
+        if b.get("pct0") is None:
+            b["pct0"] = pct
+        b["min_pct"] = pct if b.get("min_pct") is None else min(b["min_pct"], pct)
+
+
+def report_boss_start(name, t, hp):
+    pct = hp[0] / hp[1] if hp and hp[1] else None
+    b = {"name": name or "", "t": t, "pct0": pct, "min_pct": pct}
+    GAME.setdefault("boss_log", []).append(b)
+    GAME["boss_cur"] = b
+
+
+def death_cause(now):
+    """倒下的可能原因：頭目在場（或剛打完）→ 那隻頭目；不然看倒下前 30 秒在躲什麼"""
+    import report as _rep
+    b = GAME.get("boss_cur")
+    if b is None and GAME.get("boss_log") and now - GAME.get("boss_end_t", 0) < 15:
+        b = GAME["boss_log"][-1]
+    if b is not None:
+        return "頭目 " + _rep.boss_name(b.get("name"))
+    recent = {w for w, t in GAME.get("kite_hist", []) if now - t < 30}
+    for w, label in (("一大群怪物包圍", "一大群怪物包圍"), ("被怪物圍住", "被怪物圍住"),
+                     ("HP 掉很快", "HP 掉很快（小怪）"), ("HP 太低", "HP 太低（小怪）")):
+        if w in recent:
+            return label
+    return "不明（沒有頭目在場）"
+
+
+def report_game_end(cfg):
+    """結果畫面出現時呼叫：這一場記到每日報表"""
+    try:
+        import report as _rep
+        now = time.time()
+        mt = int(GAME.get("max_timer", 0) or 0)
+        hp = GAME.get("last_hp")
+        dead_hp = bool(hp and hp[0] == 0)
+        if GAME.get("ending_logged") and not dead_hp:
+            result = "通關"          # 有看到打完最後頭目的倒數
+        elif dead_hp or 0 < mt < cfg["move"].get("boss_capture_from", 830):
+            result = "倒下"          # HP 0，或還沒到最後頭目就結束
+        else:
+            result = "不確定"
+        cause = death_cause(now) if result == "倒下" else ""
+        tc = cfg["town"]
+        stage = ("遠征：" + tc.get("stage", "")) if town_mode(tc) == "expedition" else "節慶主持人"
+        rec = {"start": GAME.get("battle_t0"), "end": now, "stage": stage, "result": result,
+               "max_timer": mt, "cause": cause, "last_hp": list(hp) if hp else None,
+               "hp_min_pct": GAME.get("hp_min_pct"), "char_lv": GAME.get("char_lv"),
+               "bosses": [dict(b) for b in GAME.get("boss_log", [])]}
+        path = _rep.record(LOG_DIR, rec, cfg["move"].get("boss_times"))
+        wb = _rep.worst_boss(rec)
+        log(f"報表：{result}，計時 {mt // 60}:{mt % 60:02d}" + (f"，可能原因：{cause}" if cause else "")
+            + (f"，扣最多血的頭目：{_rep.boss_name(wb[0].get('name'))} {wb[1]:.0f}%" if wb and wb[1] >= 1 else "")
+            + f"（今天的報表：logs\\{os.path.basename(path)}）")
+    except Exception as e:
+        log(f"報表寫入失敗（不影響掛機）：{e}")
+    finally:
+        GAME.update(boss_log=[], boss_cur=None, hp_min_pct=None, kite_hist=[])
 
 
 def save_image(img, name):
@@ -2883,7 +3023,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
     H, W = frame.shape[:2]
     ox, oy = rect[0], rect[1]
     items = ocr(frame, ox, oy)
-    mode = tc.get("mode", "festival")
+    mode = town_mode(tc)
     set_route_mode(mode)
     if mode == "expedition":
         kw, name = norm("隊長"), "遠征隊長"
@@ -2922,7 +3062,8 @@ def town_ocr(frame, rect, cfg, inp, tst):
         click(btn, tc["field_button"])
         GAME["phase"], GAME["battle_seen"] = "battle", time.time()
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
-                    maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0)
+                    maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0,
+                    late_logged=False, focused=set(), focus_off=False)
         log("進入戰鬥")
         return "acted"
 
@@ -3429,6 +3570,7 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             return True
         if kind == "result" and not GAME.get("game_counted"):
             dump_end_ring(cfg, frame)
+            report_game_end(cfg)
         log(f"{label} → 按「{sec['button']}」")
         inp.click_item(btn)
         GAME["phase"] = "town"
@@ -3443,7 +3585,8 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
                         fourth_ok=False, fourth_pick=None, banished_names=set(), seen_full=set(),
                         full_menus=0,
                         auto_logged=False, chest_reroll_off=False, chest_reroll_fail=0,
-                        chest_banish_off=False, chest_banish_fail=0, chest_banish_wait_logged=False)
+                        chest_banish_off=False, chest_banish_fail=0, chest_banish_wait_logged=False,
+                        focused=set(), focus_off=False, late_logged=False)
         time.sleep(random.uniform(0.8, 1.4))
         return True
 
@@ -3505,6 +3648,7 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             save_action_snapshot(frame, ox, oy, rel)
         return True
 
+    sec = dict(sec, priority=chest_priority(sec))   # 前期／後期排名
     best = choose_card(cards, sec, read_slots(items, "道具"))
     st["ox"], st["oy"] = ox, oy
     if chest_rank_actions(cards, best, sec, inp, st, cfg.get("levelup", {})):
@@ -3517,6 +3661,33 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             inp.click_item(bad[0]["banish"], "放逐")
             st["banished"] += 1
             st["acted"] = True
+            return True
+    # 排名前幾的寶箱：先按「專注」（之後更常出現），再選它；每種道具每局只專注一次
+    fr_ = int(sec.get("focus_rank", 3) or 0)
+    nm_ = best.get("item") or best["title"]["text"]
+    fb_ = best.get("focus")
+    # 專注按鈕沒讀到、位置又只能用猜的 → 不按（怕按到旁邊的「放逐」把最想要的卡放逐掉）
+    fsafe_ = bool(fb_) and (not fb_.get("estimated") or (
+        not (best.get("reroll") or {"estimated": True}).get("estimated") and
+        not (best.get("banish") or {"estimated": True}).get("estimated")))
+    if fr_ > 0 and best.get("rank") and best["rank"] <= fr_ and not GAME.get("focus_off") \
+            and nm_ not in GAME.setdefault("focused", set()) and fsafe_:
+        dis_f = button_really_disabled(st, best["focus"], "chest_f")
+        if dis_f is None:
+            time.sleep(0.6)
+            st["acted"] = True
+            return True
+        if dis_f:
+            GAME["focus_off"] = True
+            log("  專注按鈕變灰色了（次數用完），這局不再專注")
+        else:
+            b = best["focus"]
+            pos = inp.click_item(b, "專注") or (round(b["cx"]), round(b["cy"]))
+            GAME["focused"].add(nm_)
+            log(f"  專注：{best['title']['text']}（第 {best['rank']} 名，之後更常出現；點擊 {pos[0]},{pos[1]}"
+                + ("，位置是推算的" if b.get("estimated") else "") + "）")
+            st["acted"] = True
+            time.sleep(0.5)
             return True
     if not best["pri"] and st["rerolls"] < sec.get("max_reroll", 0) and sec.get("priority"):
         rr = next((i for i in items if i["n"] == "重抽全部"), None)
@@ -3807,6 +3978,41 @@ def set_difficulty(frame, items, rect, cfg, inp):
     return True
 
 
+def town_mode(tc):
+    """這一場要刷什麼：設定是遠征，但遠征連續失敗 → 先改刷節慶主持人一陣子，不要卡著"""
+    mode = tc.get("mode", "festival")
+    if mode == "expedition" and time.time() < GAME.get("exp_fallback_until", 0):
+        return "festival"
+    return mode
+
+
+def expedition_fail(frame, items, rect, inp, reason):
+    """遠征選關失敗：存一張圖（方便查原因）、關掉視窗；連續 3 次就先改刷節慶主持人 20 分鐘"""
+    ox, oy = rect[0], rect[1]
+    H, W = frame.shape[:2]
+    EXP["fails"] = EXP.get("fails", 0) + 1
+    log(f"遠征：{reason} → 關掉視窗重試（第 {EXP['fails']} 次）")
+    try:
+        save_snapshot(frame, "expedition_fail", items=[dict(i, x=i["x"] - ox, y=i["y"] - oy) for i in items])
+        log("  畫面存在 logs\\expedition_fail_*.jpg，可以傳給開發者看")
+    except Exception:
+        pass
+    close = next((i for i in items if match(i["text"], "關閉") and i["cy"] - oy > H * 0.8), None)
+    if close:
+        inp.click_item(close, "關閉")
+    else:
+        inp.press("escape")
+    fails = EXP["fails"]
+    EXP.clear()
+    EXP["fails"] = fails
+    if fails >= 3:
+        GAME["exp_fallback_until"] = time.time() + 20 * 60
+        EXP["fails"] = 0
+        log("遠征連續失敗 3 次 → 這 20 分鐘先改刷節慶主持人，之後再試遠征")
+    time.sleep(1.5)
+    return True
+
+
 def handle_expedition(frame, items, rect, cfg, inp):
     """遠征視窗：左邊選關卡 → 確認右邊大標題是那一關 → 按「出發」"""
     tc = cfg["town"]
@@ -3820,8 +4026,8 @@ def handle_expedition(frame, items, rect, cfg, inp):
         inp.click_item(item, label)
 
     close = next((i for i in items if match(i["text"], "關閉") and i["cy"] - oy > H * 0.8), None)
-    if tc.get("mode") != "expedition":
-        log("不小心打開了遠征視窗（目前設定是刷節慶主持人）→ 關閉")
+    if town_mode(tc) != "expedition":
+        log("不小心打開了遠征視窗（這一場要刷節慶主持人）→ 關閉")
         EXP["closes"] = EXP.get("closes", 0) + 1 if time.time() - EXP.get("close_t", 0) < 20 else 1
         EXP["close_t"] = time.time()
         if close:
@@ -3836,24 +4042,34 @@ def handle_expedition(frame, items, rect, cfg, inp):
 
     stage = tc.get("stage") or EXPEDITION_STAGES[0]
     if time.time() - EXP.get("t", 0) > 60:          # 新的一次選關
+        fails = EXP.get("fails", 0)
         EXP.clear()
+        EXP["fails"] = fails
     EXP["t"] = time.time()
-    titles = [i for i in items if W * 0.36 < i["cx"] - ox < W * 0.8 and H * 0.25 < i["cy"] - oy < H * 0.42
-              and stage_of(i["text"])]
-    shown = stage_of(max(titles, key=lambda i: i["h"])["text"]) if titles else None
-    if shown == stage:
-        go = next((i for i in items if match(i["text"], "出發") and i["cy"] - oy > H * 0.8
-                   and i["cx"] - ox > W * 0.6), None)
+    rows = _rows_joined(items)
+    # 右邊大標題：目前選到哪一關（範圍放寬，名字長的關卡標題位置會不一樣）
+    titles = [i for i in rows if W * 0.36 < i["cx"] - ox < W * 0.98 and H * 0.12 < i["cy"] - oy < H * 0.55
+              and stage_in(i["text"])]
+    shown = stage_in(max(titles, key=lambda i: i["h"])["text"]) if titles else None
+
+    def find_go():
+        go = next((i for i in items if match(i["text"], "出發") and i["cy"] - oy > H * 0.75
+                   and i["cx"] - ox > W * 0.55), None)
         if go is None:
-            big = ocr(frame[int(H * 0.85):, int(W * 0.6):], ox + int(W * 0.6), oy + int(H * 0.85),
+            big = ocr(frame[int(H * 0.8):, int(W * 0.55):], ox + int(W * 0.55), oy + int(H * 0.8),
                       scale=1.5, min_score=0.3)
             go = next((i for i in big if match(i["text"], "出發")), None)
+        return go
+
+    # 標題讀不到，但已經點過那一關兩次 → 照點的那一關出發（不要一直卡在這裡）
+    sure = shown == stage or (shown is None and EXP.get("clicked", 0) >= 2)
+    if sure:
+        go = find_go()
         if go is None:
-            if not EXP.get("nogo_logged"):
-                log(f"「{stage}」沒有「出發」按鈕（可能要先看劇情或還沒解鎖）→ 停止，請手動處理")
-                EXP["nogo_logged"] = True
-            CONTROL["stop"] = True
-            return True
+            return expedition_fail(frame, items, rect, inp,
+                                   f"「{stage}」沒有「出發」按鈕（可能還沒解鎖、或要先看劇情）")
+        if shown is None:
+            log(f"遠征：右邊標題讀不到，照剛才點的「{stage}」出發")
         click(go, "出發")
         log(f"出發：{stage}（接著調難度、按前往野外）")
         EXP.clear()
@@ -3861,32 +4077,29 @@ def handle_expedition(frame, items, rect, cfg, inp):
         return True
 
     # 左邊清單找關卡名稱
-    left = [i for i in items if i["cx"] - ox < W * 0.36 and H * 0.12 < i["cy"] - oy < H * 0.9]
-    hit = next((i for i in left if stage_of(i["text"]) == stage), None)
+    left = [i for i in rows if i["cx"] - ox < W * 0.4 and H * 0.1 < i["cy"] - oy < H * 0.92]
+    hit = next((i for i in left if stage_in(i["text"]) == stage), None)
     if hit:
         if EXP.get("clicked", 0) >= 4:
-            log(f"點了「{stage}」好幾次右邊都沒變 → 停止，請手動確認")
-            CONTROL["stop"] = True
-            return True
+            return expedition_fail(frame, items, rect, inp,
+                                   f"點了「{stage}」好幾次，右邊還是「{shown or '讀不到'}」")
         EXP["clicked"] = EXP.get("clicked", 0) + 1
         click(hit, stage)
-        time.sleep(0.6)
+        time.sleep(0.8)
         return True
     # 清單裡沒看到 → 捲動清單（先往下，捲到底再往上）
     d = EXP.setdefault("dir", 1)
     EXP["n"] = EXP.get("n", 0) + 1
-    if EXP["n"] > 5:
+    if EXP["n"] > 6:
         EXP["dir"], EXP["n"] = -d, 0
         EXP["cycles"] = EXP.get("cycles", 0) + 1
         if EXP["cycles"] >= 3:
-            log(f"遠征清單裡找不到「{stage}」→ 停止，請確認關卡名稱")
-            CONTROL["stop"] = True
-            return True
+            return expedition_fail(frame, items, rect, inp, f"清單裡找不到「{stage}」")
     if not EXP.get("scroll_logged"):
         log(f"清單裡還沒看到「{stage}」→ 捲動找找")
         EXP["scroll_logged"] = True
     inp.scroll(ox + W * 0.18, oy + H * 0.55, 3 * EXP["dir"], "遠征清單")
-    time.sleep(0.5)
+    time.sleep(0.6)
     return True
 
 
@@ -4073,6 +4286,49 @@ def stats_text():
     return f"{head}｜{n} 場｜每小時 {gph:.1f} 場｜平均每場 {int(avg // 60)}:{int(avg % 60):02d}"
 
 
+def restart_edge(bcfg, old_page):
+    """定時重開遊戲用的 Edge：關掉 → 重新開 → 重新連線。回傳新的連線；失敗回傳 None"""
+    import browser_cdp as bc
+    port = int(bcfg.get("port", 9229))
+    log("掛機一段時間了 → 重開遊戲用的 Edge（瀏覽器開太久會越來越慢、越吃記憶體）")
+    try:
+        old_page.close()
+    except Exception:
+        pass
+    if not bc.close_browser(port):
+        log("Edge 沒有關掉，這次先不重開，繼續用原本的")
+        try:
+            return bc.CdpPage(port, "ro-survivors", log=log)
+        except Exception as e:
+            log(f"重新連線失敗：{e}")
+            return None
+    time.sleep(3)          # 等 Edge 完全結束（設定檔解除鎖定）
+    exe = bc.find_edge(bcfg.get("edge_path", ""))
+    if not bc.launch_browser(exe, bcfg.get("url", "https://ro-survivors.com"), port,
+                             os.path.join(BASE_DIR, "edge_profile"),
+                             tuple(bcfg.get("window_size", [1280, 960])), log=log):
+        return None
+    page = None
+    for _ in range(30):
+        try:
+            page = bc.CdpPage(port, "ro-survivors", log=log)
+            break
+        except Exception:
+            time.sleep(1)
+    if page is None:
+        log("Edge 重開了，但連不上")
+        return None
+    if bcfg.get("lock_window_size", True):
+        try:
+            ws = bcfg.get("window_size", [1280, 960])
+            page.ensure_window(ws[0], ws[1])
+        except Exception:
+            pass
+    page.latest(wait=20)
+    log("Edge 重開好了 → 接著自動登入、選角色、繼續掛機")
+    return page
+
+
 def run(cfg):
     global MOVER
     dry = cfg["dry_run"]
@@ -4097,6 +4353,7 @@ def run(cfg):
     use_cdp = bcfg.get("mode") == "cdp"
     page = None
     hwnd = None
+    edge_t0 = time.time()
     if use_cdp:
         import browser_cdp as bc
         exe = bc.find_edge(bcfg.get("edge_path", ""))
@@ -4107,6 +4364,7 @@ def run(cfg):
             return
         page = bc.CdpPage(int(bcfg.get("port", 9229)), "ro-survivors", log=log)
         IO = CdpIO(page)
+        edge_t0 = time.time()
         if bcfg.get("lock_window_size", True):
             try:
                 ws = bcfg.get("window_size", [1280, 960])
@@ -4360,7 +4618,8 @@ def run(cfg):
                     battle_t0 = now
                     GAME.update(bell_ep=None, bells_done=[], bell_count=0, mvp_logged=False, last_hp=None,
                                 kite_why=None, boss_hp0=None, boss_seen=[], hp_hist=[], hp_drop_until=0,
-                                crowd_until=0)
+                                crowd_until=0, battle_t0=now, boss_log=[], boss_cur=None, hp_min_pct=None,
+                                kite_hist=[], char_lv=None)
                     GAME.pop("crowd_since", None)
                     if dodger:
                         dodger.stats['dodge'] = 0
@@ -4418,6 +4677,30 @@ def run(cfg):
                         CONTROL["status"] = ""
                         GAME.update(rest_until=None, rest_target=None, games_since_rest=0)
                         st_town.clear()
+                        continue
+
+                # ---- 定時重開遊戲用的 Edge（掛久了瀏覽器會越來越慢）：一局剛打完、下一局還沒開始 ----
+                rh_ = float(bcfg.get("restart_hours", 6) or 0)
+                if use_cdp and not dry and rh_ > 0 and not in_battle and GAME.get("game_counted") \
+                        and now - edge_t0 >= rh_ * 3600 and GAME.get("rest_until") is None:
+                    if not (cfg.get("login", {}).get("enabled") and cfg.get("charselect", {}).get("enabled")):
+                        if not GAME.get("restart_skip_logged"):
+                            GAME["restart_skip_logged"] = True
+                            log("該定時重開 Edge 了，但沒有開「自動登入」（重開後要按開始遊戲、選角色）→ 先不重開")
+                    else:
+                        MOVER.set(None, False)
+                        watcher.paused = True
+                        time.sleep(0.5)
+                        new_page = restart_edge(bcfg, page)
+                        if new_page is None:
+                            raise RuntimeError("定時重開 Edge 失敗")   # 交給自動重新開始處理
+                        page = new_page
+                        IO = CdpIO(page)
+                        edge_t0 = time.time()
+                        watcher.paused = False
+                        st_town.clear()
+                        GAME.update(phase=None, last_sig=None)
+                        menu_done_t = time.time()      # 重開前讀到的畫面不算
                         continue
 
                 # ---- 不在戰鬥中：城鎮流程 ----
@@ -4486,6 +4769,9 @@ def run(cfg):
                         hh_.append((now, hp_now[0], hp_now[1]))
                         del hh_[:-30]
                     GAME["last_hp"] = hp_now
+                    report_hp(hp_now)
+                if res.get("char_lv") is not None and res.get("char_lv_t", 0) > GAME.get("battle_t0", 0):
+                    GAME["char_lv"] = res["char_lv"]
                 if mvp_on and not GAME.get("mvp_logged"):
                     GAME["mvp_logged"] = True
                     nm_ = res.get("mvp_name") or ""
@@ -4493,16 +4779,21 @@ def run(cfg):
                     hp_ = GAME.get("last_hp")
                     GAME["boss_hp0"] = hp_
                     GAME.setdefault("boss_seen", []).append(t_)
+                    report_boss_start(nm_, t_, hp_)
                     log(f"頭目 {nm_} 出現（計時 {t_ // 60}:{t_ % 60:02d}"
                         + (f"，HP {hp_[0]}/{hp_[1]}" if hp_ else "") + "）"
                         + ("→ 開始閃避地上的紅色預警範圍" if dodger else ""))
                 elif not mvp_on and GAME.get("mvp_logged"):
                     # 頭目打完（血條消失）→ 記一下這場頭目戰掉了多少血，下一隻頭目再重新記
                     GAME["mvp_logged"] = False
+                    GAME["boss_cur"], GAME["boss_end_t"] = None, now
                     h0, h1 = GAME.get("boss_hp0"), GAME.get("last_hp")
                     if h1:
                         log(f"頭目戰結束：HP {h1[0]}/{h1[1]}"
                             + (f"（頭目出現時 {h0[0]}/{h0[1]}）" if h0 else ""))
+                bc_ = GAME.get("boss_cur")
+                if mvp_on and bc_ is not None and not bc_.get("name") and res.get("mvp_name"):
+                    bc_["name"] = res["mvp_name"]       # 頭目名字晚一點才讀到 → 補上（報表用）
                 if mcfg.get("boss_capture_games", 3) and (mvp_on or GAME.get("max_timer", 0) >=
                         mcfg.get("boss_capture_from", 830)) and not GAME.get("ending_logged") \
                         and now >= boss_cap["next"]:
@@ -4526,14 +4817,14 @@ def run(cfg):
                 if mmap:
                     # 地圖用「刷哪一關」的設定來分（讀小地圖標題的名字不一定讀得到）
                     tcf_ = cfg["town"]
-                    mkey = tcf_.get("stage") if tcf_.get("mode") == "expedition" and tcf_.get("stage") \
+                    mkey = tcf_.get("stage") if town_mode(tcf_) == "expedition" and tcf_.get("stage") \
                         else "節慶主持人"
                     mmap.update(frame, now, bst["world"], mkey)
                     mm_ok = not dry and mmap.ready(now)
                 # 頭目快出現（例如斐揚洞穴 13:40 之後）：停在原地，等鐘出現再躲；頭目死後倒數也不動
                 tcf = cfg["town"]
                 hold = (tcf.get("boss_hold") or {}).get(tcf.get("stage")) \
-                    if tcf.get("mode") == "expedition" else None
+                    if town_mode(tcf) == "expedition" else None
                 hold_on = bool(hold and GAME.get("max_timer", 0) >= int(hold))
                 # 頭目機制「躲到鐘下！」：找鐘、走到鐘底下，到了就站著不動
                 bs = bell_step(frame, lc, bst["world"], now, now - res.get("bell_t", 0) < 3.0, hold_on)
@@ -4606,6 +4897,9 @@ def run(cfg):
                         kite_why = "HP 太低"
                 if kite_why != GAME.get("kite_why"):
                     if kite_why:
+                        kh_ = GAME.setdefault("kite_hist", [])
+                        kh_.append((kite_why, now))
+                        del kh_[:-20]
                         hp_ = GAME.get("last_hp")
                         log(f"{kite_why} → 不追遠處的東西，往怪少、空曠的地方繞圈移動"
                             + ("、躲紅色預警" if dodge_on else "")
