@@ -15,7 +15,7 @@ from tkinter import ttk, messagebox
 
 import ro_bot as rb
 
-DISCORD_URL = "https://discord.gg/zKURKw8ry"   # Discord 社群邀請連結
+DISCORD_URL = "https://discord.gg/HsUFaePnXF"   # Discord 社群邀請連結
 import updater
 
 # 沒有線上更新的版本：程式資料夾裡有 no_update.flag 這個檔案
