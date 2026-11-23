@@ -9,10 +9,13 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 import ro_bot as rb
+
+DISCORD_URL = "https://discord.gg/zKURKw8ry"   # Discord 社群邀請連結
 import updater
 
 # 沒有線上更新的版本：程式資料夾裡有 no_update.flag 這個檔案
@@ -187,8 +190,12 @@ class App:
             b.pack(side="left", expand=True, fill="x", padx=4)
 
         # 掛機統計（每秒更新：場數、每小時幾場、平均每場時間、每場撞牆次數）
-        self.stats_lbl = ttk.Label(self.root, text=rb.stats_text(), foreground="#444")
-        self.stats_lbl.pack(fill="x", padx=12, pady=(0, 2))
+        srow = ttk.Frame(self.root)
+        srow.pack(fill="x", padx=12, pady=(0, 2))
+        ttk.Button(srow, text="加入 Discord 社群", command=lambda: webbrowser.open(DISCORD_URL)).pack(
+            side="right")
+        self.stats_lbl = ttk.Label(srow, text=rb.stats_text(), foreground="#444")
+        self.stats_lbl.pack(side="left", fill="x", expand=True)
         self.stats_next = 0
 
         nb = ttk.Notebook(self.root)
