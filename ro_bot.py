@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.19"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.20"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2277,7 +2277,11 @@ def handle_levelup(cards, items, sec, inp, st):
             if GAME["banish_fail"] >= 2:
                 GAME["banish_off"] = True
                 log("  放逐好像沒有作用（次數可能用完了），這局不再放逐")
-        if not GAME["banish_off"] and button_disabled(st, four[0]["banish"]):
+        dis_ = None if GAME["banish_off"] else button_really_disabled(st, four[0]["banish"], "skill")
+        if dis_ is None and not GAME["banish_off"]:
+            time.sleep(0.6)
+            return True         # 按鈕暗暗的：等動畫播完再看一次
+        if dis_:
             GAME["banish_off"] = True
             log("  放逐按鈕變灰色了（次數用完），這局不再放逐")
         if not GAME["banish_off"]:
@@ -2353,11 +2357,16 @@ def handle_levelup(cards, items, sec, inp, st):
             inp.click_item(rr, "重抽全部")
             st["rerolls"] += 1
             return True
-    others = [c for c in cards if not c["four"] and not c["listed"]] or \
-        [c for c in cards if not c["four"]] or cards
+    # 沒主力可選：先選已經有的第四技能（不多佔欄位），再來是沒勾放逐的，
+    # 再來是攻擊：屬性附加（不佔欄位），最後才是冰箭術這類要額外放逐的
+    fourth_ = GAME.get("fourth")
+    own4 = [c for c in cards if fourth_ and similar(c["title"]["text"], fourth_)]
+    others = own4 or [c for c in cards if not c["listed"]] or \
+        [c for c in cards if c["always"]] or [c for c in cards if not c["maintype"]] or cards
     c = random.choice(others)
     GAME["levelups"] = GAME.get("levelups", 0) + 1
-    log(f"  沒有主力技能，隨便選：{c['title']['text']}")
+    log(f"  沒有主力技能，選：{c['title']['text']}"
+        + ("（已經有的第四技能）" if own4 else ""))
     pick_card(c, cards, items, inp, sec.get("number_keys", True))
     return True
 
@@ -3311,6 +3320,20 @@ def button_disabled(st, b):
     return float(np.median(v)) < 160
 
 
+def button_really_disabled(st, b, key):
+    """按鈕灰色要連續看到兩次（隔 0.5 秒以上）才算數：
+    卡片剛換、動畫還在播的時候按鈕也會暫時變暗，會被誤判成次數用完"""
+    if not button_disabled(st, b):
+        GAME.pop("dis_" + key, None)
+        return False
+    t0 = GAME.get("dis_" + key)
+    now = time.time()
+    if t0 is None or now - t0 > 6:
+        GAME["dis_" + key] = now
+        return None             # 第一次看到：先等一下再看
+    return now - t0 >= 0.5
+
+
 def skill_banish_done(cfg_lv):
     """技能那邊該放逐的都放逐完了嗎（第四技能、攻擊：屬性附加）"""
     if not cfg_lv.get("banish_fourth", True) and not cfg_lv.get("banish"):
@@ -3364,7 +3387,10 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
                 if not GAME.get("chest_banish_wait_logged"):
                     GAME["chest_banish_wait_logged"] = True
                     log("  寶箱有排名太後面的卡，但技能還沒放逐完 → 先不放逐寶箱")
-            elif button_disabled(st, max(bad, key=rk)["banish"]):
+            elif (dis_b := button_really_disabled(st, max(bad, key=rk)["banish"], "chest_b")) is None:
+                time.sleep(0.6)
+                return True
+            elif dis_b:
                 turn_off("chest_banish", "按鈕變灰色了（放逐次數用完）")
             else:
                 c = max(bad, key=rk)
@@ -3384,7 +3410,11 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
         bad = [c for c in cards if rk(c) > rr and c is not best]
         if rk(best) > rr:
             bad.append(best)        # 連最好的都在前 N 名之外 → 也重抽
-        if bad and button_disabled(st, max(bad, key=rk)["reroll"]):
+        dis_r = button_really_disabled(st, max(bad, key=rk)["reroll"], "chest_r") if bad else False
+        if dis_r is None:
+            time.sleep(0.6)
+            return True
+        if dis_r:
             turn_off("chest_reroll", "按鈕變灰色了（重抽次數用完）")
             bad = []
         if bad:
