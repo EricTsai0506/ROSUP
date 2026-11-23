@@ -11,3 +11,4 @@ private_key.pem
 issued.csv
 minimap/
 town_route_expedition.json
+!defaults/town_route.json
