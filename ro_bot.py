@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.18"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.19"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -308,7 +308,8 @@ DEFAULT_CONFIG = {
         "start_button_pos": [0.786, 0.743],
         "field_button": "前往野外",
         "learn_route": True,
-        "click_move": True,          # 點主持人讓遊戲自己走過去（遊戲內建尋路，不會亂走）
+        "click_move": True,          # 點主持人讓遊戲自己走過去（遊戲內建尋路，不會亂走）；只點一次
+        "click_wait": 30,            # 點完幾秒還沒走到主持人旁邊，就改回自己走
         "zoom_out": 10,              # 進城鎮後滾輪拉遠幾格，從出生點就看得到主持人（0 = 不調整）
         "mode": "festival",          # festival = 節慶主持人（原本的關卡）；expedition = 遠征隊長
         "stage": "普隆德拉原野",       # 遠征要刷的關卡
@@ -2634,7 +2635,7 @@ def town_reset(tst):
               "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir",
               "path_w", "plan_t", "plan_tgt", "move_since", "last_dir",
               "spawn_moved", "guess_used", "spiral_t0",
-              "zoom_done", "zoomed", "click_next", "click_hold_until", "label_h", "click_n", "click_fail", "click_d", "click_logged"):
+              "zoom_done", "zoomed", "click_next", "click_hold_until", "label_h", "click_n", "click_fail", "click_d", "click_logged", "click_t", "click_gave_up"):
         tst.pop(k, None)
     tst.update(world=(0.0, 0.0), trail=[(0.0, 0.0)], fresh=True, stuck_total=0, stuck_n=0)
 
@@ -2879,45 +2880,39 @@ def _town_stuck(tst, now, world, step_dir):
 
 
 def town_click(frame, rect, cfg, inp, tst, now, lc):
-    """點主持人頭上名字的正下方：遊戲會自己找路走過去（繞過噴水池、花圃）。
-    回傳 None = 交給遊戲走、程式不按方向鍵；False = 點擊沒用，改回自己走"""
+    """看到主持人 → 只點一次他頭上名字的正下方，遊戲會自己找路走過去（繞過噴水池、花圃）。
+    點完就不再點，等交談提示出現；太久沒到才改回自己走。
+    回傳 None = 交給遊戲走、程式不按方向鍵；False = 改回自己走"""
     tc = cfg["town"]
-    target = tst.get("target")
-    if target is None or tst.get("click_fail", 0) >= 4:
+    if tst.get("click_n", 0) >= 1:
+        # 已經點過了：等遊戲走到，不再點（再點會把對話框點掉、點到別的 NPC）
+        if now - tst.get("click_t", now) < tc.get("click_wait", 30):
+            return None
+        if not tst.get("click_gave_up"):
+            tst["click_gave_up"] = True
+            log(f"點了主持人 {tc.get('click_wait', 30)} 秒還沒走到 → 改成自己走過去")
         return False
-    # 剛按過空白鍵、正在等「開始遊戲」→ 什麼都不點（之前會把對話框點掉、點到遠征隊長）
-    if now < tst.get("click_hold_until", 0) or now < tst.get("expect_start_until", 0):
+    target = tst.get("target")
+    if target is None:
+        return False
+    if now < tst.get("expect_start_until", 0):
         return None
     H, W = frame.shape[:2]
     off = tc.get("npc_body_offset", 75)
     lh = tst.get("label_h", 18)
     lx, ly = target[0], target[1] - off             # 名字標籤的位置
     cx, cy = lx, ly + lh * 1.6                      # 名字正下方 = 主持人頭的位置
-    # 角色在畫面中間；名字已經在角色頭上附近 → 到了，等交談提示，不要再點
     d = math.hypot(lx - W / 2, ly - (H / 2 - lh * 3))
     if d < max(70, lh * 4):
-        return None
-    if now < tst.get("click_next", 0):
-        return None
-    # 上次點了之後幾乎沒有靠近 → 算一次失敗（被擋住、點到不能走的地方）
-    if tst.get("click_d") is not None and d > tst["click_d"] - 15:
-        tst["click_fail"] = tst.get("click_fail", 0) + 1
-        if tst["click_fail"] >= 4:
-            log("點主持人好像沒有作用 → 改成自己走過去")
-            return False
-    elif tst.get("click_d") is not None:
-        tst["click_fail"] = 0
-    tst["click_d"] = d
+        return None                                 # 已經在旁邊了，等交談提示
     ox, oy = rect[0], rect[1]
     MOVER.set(None, False)
-    if not tst.get("click_logged"):
-        log(f"點{tc.get('npc_name', '節慶主持人')}，讓角色自己走過去（距離約 {d:.0f} 像素）")
-        tst["click_logged"] = True
+    log(f"點{tc.get('npc_name', '節慶主持人')}一次，讓角色自己走過去（距離約 {d:.0f} 像素）")
     inp.click_item({"text": tc.get("npc_name", "節慶主持人"), "x": ox + cx - 5, "y": oy + cy - 5,
                     "w": 10, "h": 10}, tc.get("npc_name", "節慶主持人"))
     park_mouse(rect)
-    tst["click_n"] = tst.get("click_n", 0) + 1
-    tst["click_next"] = now + (3.0 if d > 250 else 2.0)
+    tst["click_n"] = 1
+    tst["click_t"] = now
     tst["ocr_next"] = min(tst.get("ocr_next", now + 1), now + 0.8)
     return None
 
