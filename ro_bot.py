@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.13"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.14"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2240,6 +2240,8 @@ def handle_levelup(cards, items, sec, inp, st):
         # 放逐清單裡的其他技能不放逐，只是不選它（banish_all_listed = true 才會全部放逐）
         c["four"] = (bool(fourth) and sec.get("banish_fourth", True) and similar(t, fourth)) \
             or c["always"] or (c["listed"] and sec.get("banish_all_listed", False))
+        # 勾了放逐的其他技能：第四技能和攻擊：屬性附加都放逐完，還有次數（按鈕不是灰色）才放逐
+        c["extra"] = c["listed"] and not c["four"]
 
     lv = read_level(items)
     early_lv = lv if lv is not None else GAME.get("levelups", 0) + 2
@@ -2256,6 +2258,8 @@ def handle_levelup(cards, items, sec, inp, st):
 
     # 1. 第四技能確認選到之後：第四技能或放逐清單裡的技能出現 → 放逐
     four = [c for c in cards if c["four"] and not c["pri"]]
+    if not four and GAME.get("fourth_ok") and skill_banish_done(sec):
+        four = [c for c in cards if c["extra"] and not c["pri"]]
     if four and not GAME.get("fourth_ok"):
         four = []
     if four and not GAME["banish_off"]:
@@ -2334,7 +2338,8 @@ def handle_levelup(cards, items, sec, inp, st):
             inp.click_item(rr, "重抽全部")
             st["rerolls"] += 1
             return True
-    others = [c for c in cards if not c["four"]] or cards
+    others = [c for c in cards if not c["four"] and not c["listed"]] or \
+        [c for c in cards if not c["four"]] or cards
     c = random.choice(others)
     GAME["levelups"] = GAME.get("levelups", 0) + 1
     log(f"  沒有主力技能，隨便選：{c['title']['text']}")
