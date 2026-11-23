@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.8"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.9"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -350,6 +350,10 @@ DEFAULT_CONFIG = {
         "boss_capture_from": 830,    # 計時到幾秒開始存（830 = 13:50）
         "magnet_first": True,        # 小地圖上附近有磁鐵就先去撿（畫面上有寶箱時還是先撿寶箱）
         "boss_dodge": True,          # 頭目（MVP）出現時：看地上紅色預警範圍，站在裡面就躲出去、走路不踩進去
+        "boss_kite": True,           # 頭目戰：不追遠處的寶箱／磁鐵，一直在空曠的地方繞圈移動
+        "boss_times": [180, 300, 420, 600, 720, 840],   # 頭目出現的遊戲時間（秒）：3、5、7、10、12、14 分
+        "boss_prep_sec": 10,         # 頭目出現前幾秒先走到空曠的地方、開始繞圈
+        "low_hp_kite": 0.4,          # HP 低於這個比例 → 不撿東西，先繞圈躲（0 = 不用）
         "end_capture": 5,            # 一局提早結束（還沒到 13:50 就結束，多半是角色倒下）→ 存最後 20 秒截圖，每次啟動存幾場
     },
     "browser": {
@@ -1726,9 +1730,10 @@ class OcrWatcher(threading.Thread):
                         upd["bell_t"] = upd["t"]
                     # 頭目（MVP）出現：上方有「MVP 名字」和頭目血條
                     for i in items:
-                        if "mvp" in i["n"]:
+                        if "mvp" in i["n"] or (i["n"].startswith("头目") and len(i["n"]) <= 10
+                                                and i["cy"] < y + H * 0.3 and not upd["kind"]):
                             upd["mvp_t"] = upd["t"]
-                            nm_ = re.sub(r"(?i)mvp|出現了|出现了|[!！\s]", "", i["text"])
+                            nm_ = re.sub(r"(?i)mvp|頭目|头目|出現了|出现了|[!！\s]", "", i["text"])
                             if not nm_:
                                 nx_ = [j for j in items if j is not i and abs(j["cy"] - i["cy"]) < i["h"]
                                        and 0 < j["x"] - (i["x"] + i["w"]) < i["h"] * 3]
@@ -3913,7 +3918,8 @@ def run(cfg):
                     last_coord, coord_same_since = None, now
                     bumps = 0
                     battle_t0 = now
-                    GAME.update(bell_ep=None, bells_done=[], bell_count=0, mvp_logged=False, last_hp=None)
+                    GAME.update(bell_ep=None, bells_done=[], bell_count=0, mvp_logged=False, last_hp=None,
+                                kite_why=None, boss_hp0=None, boss_seen=[])
                     if dodger:
                         dodger.stats['dodge'] = 0
                     with watcher.lock:              # 上一場的地圖名稱不要帶到這一場
@@ -4034,10 +4040,21 @@ def run(cfg):
                     GAME["last_hp"] = (res["hp"], res["hp_max"])
                 if mvp_on and not GAME.get("mvp_logged"):
                     GAME["mvp_logged"] = True
-                    nm_ = res.get("mvp_name") or "頭目"
+                    nm_ = res.get("mvp_name") or ""
                     t_ = GAME.get("max_timer", 0)
-                    log(f"MVP {nm_} 出現（計時 {t_ // 60}:{t_ % 60:02d}）"
+                    hp_ = GAME.get("last_hp")
+                    GAME["boss_hp0"] = hp_
+                    GAME.setdefault("boss_seen", []).append(t_)
+                    log(f"頭目 {nm_} 出現（計時 {t_ // 60}:{t_ % 60:02d}"
+                        + (f"，HP {hp_[0]}/{hp_[1]}" if hp_ else "") + "）"
                         + ("→ 開始閃避地上的紅色預警範圍" if dodger else ""))
+                elif not mvp_on and GAME.get("mvp_logged"):
+                    # 頭目打完（血條消失）→ 記一下這場頭目戰掉了多少血，下一隻頭目再重新記
+                    GAME["mvp_logged"] = False
+                    h0, h1 = GAME.get("boss_hp0"), GAME.get("last_hp")
+                    if h1:
+                        log(f"頭目戰結束：HP {h1[0]}/{h1[1]}"
+                            + (f"（頭目出現時 {h0[0]}/{h0[1]}）" if h0 else ""))
                 if mcfg.get("boss_capture_games", 3) and (mvp_on or GAME.get("max_timer", 0) >=
                         mcfg.get("boss_capture_from", 830)) and not GAME.get("ending_logged") \
                         and now >= boss_cap["next"]:
@@ -4083,9 +4100,9 @@ def run(cfg):
                     time.sleep(0.05)
                     continue
                 # 頭目（MVP）在場：地上的紅色預警範圍 → 站在裡面就往最近的安全處走
-                dodge_on = dodger is not None and not dry and mvp_on
+                dodge_on = dodger is not None and not dry and (mvp_on or bool(GAME.get("kite_why")))
                 if dodge_on:
-                    dodger.update(frame, now)
+                    dodger.update(frame, now, bst["world"], lc)
                     wall_ok = None
                     if mm_ok:
                         wall_ok = lambda v, dist_: mmap.free_dist(v, min(_mmod.LOOK, dist_ / (
@@ -4104,6 +4121,40 @@ def run(cfg):
                                                "dodge")
                             except Exception:
                                 pass
+                        MOVER.set(d, True, center)
+                        time.sleep(0.03)
+                        continue
+                # 頭目戰走位：頭目在場、頭目快出現（3/5/7/10/12/14 分前幾秒）、HP 太低 → 不追東西，繞圈移動
+                kite_why = None
+                if dodger is not None and not dry and mcfg.get("boss_kite", True) and not hold_on:
+                    mt_ = GAME.get("max_timer", 0)
+                    prep_ = mcfg.get("boss_prep_sec", 8)
+                    hp_ = GAME.get("last_hp")
+                    if mvp_on:
+                        kite_why = "頭目在場"
+                    elif any(t_ - prep_ <= mt_ < t_ + 35 and not any(t_ - prep_ <= b_ < t_ + 60 for b_ in
+                                                                    GAME.get("boss_seen", []))
+                             for t_ in mcfg.get("boss_times", [])):
+                        kite_why = "頭目快出現了"
+                    elif hp_ and hp_[1] and mcfg.get("low_hp_kite", 0.4) and \
+                            (hp_[0] / hp_[1] < mcfg.get("low_hp_kite", 0.4) or
+                             (GAME.get("kite_why") == "HP 太低" and hp_[0] / hp_[1] < 0.7)):
+                        kite_why = "HP 太低"
+                if kite_why != GAME.get("kite_why"):
+                    if kite_why:
+                        log(f"{kite_why} → 不追遠處的東西，在空曠的地方繞圈移動"
+                            + ("、躲紅色預警" if dodge_on else ""))
+                    elif GAME.get("kite_why"):
+                        log("頭目戰走位結束 → 回到平常撿東西")
+                        dodger.reset_kite()
+                    GAME["kite_why"] = kite_why
+                if kite_why:
+                    free_ = None
+                    if mm_ok:
+                        free_ = lambda v: mmap.free_dist(v, _mmod.LOOK) / _mmod.LOOK
+                    kd_ = dodger.kite(lc, now, d, bst["world"], free_)
+                    if kd_ is not None:
+                        d = blend(d, kd_, 0.6)
                         MOVER.set(d, True, center)
                         time.sleep(0.03)
                         continue
