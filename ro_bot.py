@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2372,9 +2372,10 @@ def save_route(tst, frame_shape):
                 pass
         return
     straight = math.hypot(npc[0], npc[1])
-    if length > straight * 1.6 + 150:     # 繞太遠的路線不記
+    moved = tst.get("spawn_moved")
+    if length > (straight * 3 + 300 if moved else straight * 1.6 + 150):     # 繞太遠的路線不記
         return
-    if old and old.get("size") == cand["size"]:
+    if old and old.get("size") == cand["size"] and not moved:
         better = length < old.get("len", 1e9) * 0.9 or \
             (cand["stuck"] < old.get("stuck", 99) and length < old.get("len", 1e9) * 1.1)
         if not better:
@@ -2419,7 +2420,8 @@ def town_reset(tst):
     for k in ("prev", "target", "route_on", "route_checked", "route_off", "npc_world", "npc_first",
               "route_on_success", "npc_w_reached",
               "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir",
-              "path_w", "plan_t", "plan_tgt", "move_since", "last_dir"):
+              "path_w", "plan_t", "plan_tgt", "move_since", "last_dir",
+              "spawn_moved", "guess_used", "spiral_t0"):
         tst.pop(k, None)
     tst.update(world=(0.0, 0.0), trail=[(0.0, 0.0)], fresh=True, stuck_total=0, stuck_n=0)
 
@@ -2448,31 +2450,6 @@ def town_ocr(frame, rect, cfg, inp, tst):
         inp.click_item(item, label)
         tst["cooldown_until"] = time.time() + 3
         tst["target"] = None
-
-    # 遊戲更新後：打完一場回到城鎮時已經離開大廳（上方顯示「離線」）
-    # → 點上方的地點標示，再按「單人大廳」重新進入
-    now_ = time.time()
-    if now_ - tst.get("rejoin_t", 0) < 8:
-        solo = next((i for i in items if match(i["text"], cfg["lobby"]["button"])), None)
-        if solo:
-            click(solo, cfg["lobby"]["button"])
-            tst["rejoin_t"] = 0
-            return "acted"
-    left = any(norm(k) in joined for k in ("離開大廳", "再次進入"))
-    mark = next((i for i in items if i["cy"] - oy < H * 0.15 and abs(i["cx"] - ox - W / 2) < W * 0.25
-                 and norm("離線") in i["n"]), None)
-    if mark is None and left:
-        mark = next((i for i in items if i["cy"] - oy < H * 0.15 and norm("普隆德拉") in i["n"]), None)
-    if mark is not None and now_ - tst.get("rejoin_t", 0) > 8:
-        log("已經離開大廳（上方顯示離線）→ 點上方的標示重新進入")
-        click(mark, "上方地點標示")
-        tst["rejoin_t"] = time.time()
-        tst["cooldown_until"] = time.time() + 1.2
-        if cfg["debug_snapshots"]:
-            tst["rejoin_snap"] = True
-        return "acted"
-    if tst.pop("rejoin_snap", False):
-        save_image(frame, "rejoin")          # 點完標示之後的畫面（除錯用）
 
     dm = detect_menu(items)
     if dm == "expedition":
@@ -2622,6 +2599,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
                     tst["route_on"], tst["route_i"] = True, 0
                     log("出生點跟上次一樣 → 照記住的路線走")
                 else:
+                    tst["spawn_moved"] = True    # 出生點換了（例如遊戲更新）→ 這次走成功就換掉舊路線
                     log(f"出生點跟記住的不一樣（差 {math.hypot(*off):.0f} 像素）→ 自己規劃路線")
             if tst.get("route_on"):
                 # 只校正「走路途中累積的誤差」（跟第一次看到時比），
@@ -2774,6 +2752,13 @@ def town_step(frame, rect, cfg, inp, tst):
         if tst.get("last_dir") and now - tst.get("last_seen", 0) < 2.5:
             return tst["last_dir"]
         npc_w = tst.get("npc_world")
+        if npc_w is None and not tst.get("guess_used") and tc.get("learn_route", True):
+            rt_ = load_route()
+            H_, W_ = frame.shape[:2]
+            if rt_ and rt_.get("size") == [W_, H_] and rt_.get("npc"):
+                tst["guess_used"] = True
+                npc_w = tst["npc_world"] = (float(rt_["npc"][0]), float(rt_["npc"][1]))
+                log(f"畫面上看不到{tc.get('npc_name', '節慶主持人')} → 先往上次主持人的位置走")
         if npc_w is not None and not tst.get("npc_w_reached"):
             # 剛剛有看到過主持人 → 先走回記得的位置（不要亂走）
             wx, wy = tst.get("world", (0.0, 0.0))
