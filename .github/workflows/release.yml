@@ -41,6 +41,7 @@ jobs:
           Copy-Item bot_config.json dist\RoBot\
           Copy-Item *.txt dist\RoBot\
           Copy-Item templates dist\RoBot\templates -Recurse
+          Copy-Item defaults dist\RoBot\defaults -Recurse
           Compress-Archive -Path dist\RoBot -DestinationPath RoBot-win.zip
           Set-Content -Path dist\RoBot\no_update.flag -Value "沒有線上更新的版本"
           Compress-Archive -Path dist\RoBot -DestinationPath RoBot-win-noupdate.zip

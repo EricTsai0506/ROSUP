@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.15"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.16"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2535,8 +2535,22 @@ def load_route():
         try:
             with open(ROUTE_FILE, encoding="utf-8") as f:
                 _route["data"] = json.load(f)
+        except FileNotFoundError:
+            # 第一次用：還沒有自己記的路線 → 用程式附的預設路線（開發者實際走成功的）
+            _route["data"] = None
+            try:
+                with open(os.path.join(BASE_DIR, "defaults", os.path.basename(ROUTE_FILE)),
+                          encoding="utf-8") as f:
+                    d = json.load(f)
+                d["default"] = True
+                _route["data"] = d
+                log("第一次使用：先用內建的預設路線找主持人，走成功後會記住自己的路線")
+            except Exception:
+                pass
         except Exception:
             _route["data"] = None
+        if _route["data"] is not None and not _route["data"].get("points"):
+            _route["data"] = None       # 預設路線失敗過、被停用
     return _route["data"]
 
 
@@ -2586,6 +2600,13 @@ def route_failed():
     rt["fails"] = rt.get("fails", 0) + 1
     if rt["fails"] >= 2:
         clear_route()
+        if rt.get("default"):
+            # 預設路線不適用這台電腦 → 留一個記號，之後不再用預設路線
+            try:
+                with open(ROUTE_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"disabled_default": True}, f)
+            except Exception:
+                pass
         log("記住的路線連續失敗 2 次 → 刪掉，下次重新規劃並記住新的")
         return
     try:
