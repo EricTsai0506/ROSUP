@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.9"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.10"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -163,7 +163,7 @@ _CHEST_RAW = [
         ("爆擊傷害藥劑", "+18% 爆擊傷害 → +40% 爆擊傷害"),
         ("驚奇靈藥", "+10% 尋寶率 → +20% 尋寶率"),
         ("持續傷害藥劑", "中毒、燃燒與出血傷害 +10% → +20%（僅在已造成中毒、燃燒或出血後）"),
-        ("Flee（迴避）秘藥", "+1% Flee → +5% Flee"),
+        ("迴避秘藥", "+1% 迴避（Flee）→ +5% 迴避"),
         ("詠唱靈藥", "+6 詠唱速度 → +15 詠唱速度"),
         ("廣域靈藥", "+10% 範圍 → +20% 範圍"),
         ("護甲靈藥", "-1% 承受傷害 → -5% 承受傷害"),
@@ -232,7 +232,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 15,
+    "config_version": 16,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -438,7 +438,10 @@ def migrate_config(cfg, ver=None):
         have[3:3] = main
         have += [n for n, _ in CHEST_ITEMS if CHEST_CATEGORY[n] == "神祇（技能）" and n not in have]
         cfg["chest"]["priority"] = have
-    cfg["config_version"] = 15
+    if ver < 16:  # 「Flee（迴避）秘藥」卡片上寫的是「迴避秘藥」
+        cfg["chest"]["priority"] = ["迴避秘藥" if n == "Flee（迴避）秘藥" else n
+                                    for n in cfg["chest"].get("priority", [])]
+    cfg["config_version"] = 16
     return cfg
 
 
@@ -2260,6 +2263,9 @@ def handle_levelup(cards, items, sec, inp, st):
             if GAME["banish_fail"] >= 2:
                 GAME["banish_off"] = True
                 log("  放逐好像沒有作用（次數可能用完了），這局不再放逐")
+        if not GAME["banish_off"] and button_disabled(st, four[0]["banish"]):
+            GAME["banish_off"] = True
+            log("  放逐按鈕變灰色了（次數用完），這局不再放逐")
         if not GAME["banish_off"]:
             b = four[0]["banish"]
             pos = inp.click_item(b, "放逐") or (round(b["cx"]), round(b["cy"]))
@@ -3155,6 +3161,7 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
         return True
 
     best = choose_card(cards, sec)
+    st["ox"], st["oy"] = ox, oy
     if chest_rank_actions(cards, best, sec, inp, st, cfg.get("levelup", {})):
         st["acted"] = True
         return True
@@ -3180,6 +3187,22 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
     return True
 
 
+def button_disabled(st, b):
+    """按鈕是不是灰色的（次數用完）：亮白色 = 可以按，暗灰色 = 不能按"""
+    fr = st.get("frame")
+    if fr is None or b is None:
+        return False
+    ox, oy = st.get("ox", 0), st.get("oy", 0)
+    cx, cy = b["cx"] - ox, b["cy"] - oy
+    w, h = max(6, b.get("w", 30) * 0.3), max(4, b.get("h", 20) * 0.3)
+    x0, x1 = int(max(0, cx - w)), int(min(fr.shape[1], cx + w))
+    y0, y1 = int(max(0, cy - h)), int(min(fr.shape[0], cy + h))
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return False
+    v = cv2.cvtColor(fr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)[:, :, 2]
+    return float(np.median(v)) < 160
+
+
 def skill_banish_done(cfg_lv):
     """技能那邊該放逐的都放逐完了嗎（第四技能、攻擊：屬性附加）"""
     if not cfg_lv.get("banish_fourth", True) and not cfg_lv.get("banish"):
@@ -3198,31 +3221,49 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
         return f"{c['title']['text']}（" + (f"第 {c['rank']} 名" if c.get("rank") else "不在清單") + "）"
 
     sig = tuple(norm(c["title"]["text"]) for c in cards)
-    # 上次按了重抽／放逐，卡片卻完全沒變 → 次數可能用完了
+
+    def turn_off(kind, why):
+        if not GAME.get(kind + "_off"):
+            GAME[kind + "_off"] = True
+            log(f"  寶箱{'重抽' if kind == 'chest_reroll' else '放逐'}{why}，這局不再使用")
+
+    # 上次按了重抽／放逐，同一個位置的卡片還是同一張（文字辨識可能有點不同）→ 沒有作用
     la = st.get("chest_last")
-    if la and la["sig"] == sig and time.time() - la["t"] < 6:
-        GAME[la["kind"] + "_fail"] = GAME.get(la["kind"] + "_fail", 0) + 1
-        if GAME[la["kind"] + "_fail"] >= 2 and not GAME.get(la["kind"] + "_off"):
-            GAME[la["kind"] + "_off"] = True
-            log(f"  寶箱{'重抽' if la['kind'] == 'chest_reroll' else '放逐'}好像沒有作用（次數可能用完了），這局不再使用")
+    if la and time.time() - la["t"] < 8:
+        cs = sorted(cards, key=lambda c: c["cx"])
+        same = la["idx"] < len(cs) and similar(cs[la["idx"]]["title"]["text"], la["title"])
+        if same:
+            GAME[la["kind"] + "_fail"] = GAME.get(la["kind"] + "_fail", 0) + 1
+            if GAME[la["kind"] + "_fail"] >= 2:
+                turn_off(la["kind"], "按了卡片沒變（次數可能用完了）")
+        else:
+            GAME[la["kind"] + "_fail"] = 0
     st["chest_last"] = None
+
+    def remember(kind, c):
+        cs = sorted(cards, key=lambda x: x["cx"])
+        st["chest_last"] = {"kind": kind, "t": time.time(), "idx": cs.index(c),
+                            "title": c["title"]["text"], "sig": sig}
 
     # 1. 放逐：排名在前 N 名之外，而且技能那邊已經放逐完
     br = int(sec.get("banish_rank", 0) or 0)
-    if br > 0 and not GAME.get("chest_banish_off"):
+    if br > 0 and not GAME.get("chest_banish_off") and st.get("card_banishes", 0) < 3:
         bad = [c for c in cards if rk(c) > br and c is not best]
         if bad:
             if not skill_banish_done(lv_sec or {}):
                 if not GAME.get("chest_banish_wait_logged"):
                     GAME["chest_banish_wait_logged"] = True
                     log("  寶箱有排名太後面的卡，但技能還沒放逐完 → 先不放逐寶箱")
+            elif button_disabled(st, max(bad, key=rk)["banish"]):
+                turn_off("chest_banish", "按鈕變灰色了（放逐次數用完）")
             else:
                 c = max(bad, key=rk)
                 b = c["banish"]
                 pos = inp.click_item(b, "放逐") or (round(b["cx"]), round(b["cy"]))
                 log(f"  寶箱放逐：{label(c)}，在前 {br} 名之外（點擊 {pos[0]},{pos[1]}"
                     + ("，位置是推算的" if b.get("estimated") else "") + "）")
-                st["chest_last"] = {"sig": sig, "t": time.time(), "kind": "chest_banish"}
+                remember("chest_banish", c)
+                st["card_banishes"] = st.get("card_banishes", 0) + 1
                 GAME["chest_banishes"] = GAME.get("chest_banishes", 0) + 1
                 return True
 
@@ -3233,6 +3274,9 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
         bad = [c for c in cards if rk(c) > rr and c is not best]
         if rk(best) > rr:
             bad.append(best)        # 連最好的都在前 N 名之外 → 也重抽
+        if bad and button_disabled(st, max(bad, key=rk)["reroll"]):
+            turn_off("chest_reroll", "按鈕變灰色了（重抽次數用完）")
+            bad = []
         if bad:
             c = max(bad, key=rk)
             b = c["reroll"]
@@ -3240,7 +3284,7 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
             st["card_rerolls"] = st.get("card_rerolls", 0) + 1
             log(f"  寶箱重抽：{label(c)}，在前 {rr} 名之外（點擊 {pos[0]},{pos[1]}"
                 + ("，位置是推算的" if b.get("estimated") else "") + "）")
-            st["chest_last"] = {"sig": sig, "t": time.time(), "kind": "chest_reroll"}
+            remember("chest_reroll", c)
             return True
     return False
 
@@ -3518,7 +3562,7 @@ def process_menus(kind, sct, rect, cfg, inp, st, dry):
             # 選完後等一下就讀下一張；是不是新的一組卡，由內容（Lv、卡片名稱）判斷，
             # 不比對像素（卡片的光暈、流光動畫會讓像素一直變）
             time.sleep(0.45 if ACTION.get("kind") == "click" else 0.3)
-    st.update(rerolls=0, banished=0, first=True, card_rerolls=0, chest_last=None)
+    st.update(rerolls=0, banished=0, first=True, card_rerolls=0, card_banishes=0, chest_last=None)
 
 
 def _menu_sig_img(frame):
@@ -3849,7 +3893,7 @@ def run(cfg):
                             watcher.res["ingame_t"] = 0  # 已離開戰鬥
                     continue
                 if not res["kind"] and res["t"] > menu_done_t:
-                    menu_st.update(rerolls=0, banished=0, card_rerolls=0, chest_last=None)
+                    menu_st.update(rerolls=0, banished=0, card_rerolls=0, card_banishes=0, chest_last=None)
 
                 # ---- 升級按鈕 ----
                 lvc = cfg["levelup"]
