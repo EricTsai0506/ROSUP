@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.3"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.4"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -332,6 +332,8 @@ DEFAULT_CONFIG = {
         "stuck_check": True,
         "minimap": True,             # 用右上角小地圖避開牆壁／水（會自己學每張地圖的地形）
         "minimap_goals": True,       # 畫面上沒東西撿時，往小地圖上的寶箱／磁鐵走
+        "boss_capture_games": 3,     # 打頭目時每秒存一張截圖（logs\\boss），每次啟動存幾場（0 = 不存）
+        "boss_capture_from": 830,    # 計時到幾秒開始存（830 = 13:50）
         "magnet_first": True,        # 小地圖上附近有磁鐵就先去撿（畫面上有寶箱時還是先撿寶箱）
     },
     "browser": {
@@ -1759,6 +1761,24 @@ def save_snapshot(frame, name, coins=(), chests=(), center=None, d=None, items=(
             os.remove(_snap_files.pop(0))
         except Exception:
             pass
+
+
+def save_boss_shot(frame, game_no):
+    """頭目戰截圖存到 logs\\boss（最多留 600 張，舊的自動刪）"""
+    try:
+        d = os.path.join(LOG_DIR, "boss")
+        os.makedirs(d, exist_ok=True)
+        t = time.time()
+        path = os.path.join(d, time.strftime(f"boss_g{game_no:03d}_%H%M%S", time.localtime(t))
+                            + f"_{int(t * 10) % 10}.jpg")
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            buf.tofile(path)
+        files = sorted(f for f in os.listdir(d) if f.endswith(".jpg"))
+        for f in files[:-600]:
+            os.remove(os.path.join(d, f))
+    except Exception as e:
+        log(f"頭目截圖存檔失敗：{e}")
 
 
 def save_image(img, name):
@@ -3516,6 +3536,7 @@ def run(cfg):
     panel_next = 0
     zoom_at, was_battle = 0, False
     bumps, mm_snap_next = 0, 0
+    boss_cap = {"games": 0, "next": 0.0, "game": None}
     win_next = time.time() + 10
 
     try:
@@ -3779,6 +3800,17 @@ def run(cfg):
                         continue
                 lc = (W / 2 + mcfg["character_offset"][0], H / 2 + mcfg["character_offset"][1])
                 center = (ox + lc[0], oy + lc[1])
+                # 頭目戰截圖：之後拿來分析頭目的招式、做閃避策略
+                if mcfg.get("boss_capture_games", 3) and GAME.get("max_timer", 0) >= \
+                        mcfg.get("boss_capture_from", 830) and not GAME.get("ending_logged") \
+                        and now >= boss_cap["next"]:
+                    gid = GAME.get("games_done", 0)
+                    if boss_cap["game"] != gid and boss_cap["games"] < mcfg.get("boss_capture_games", 3):
+                        boss_cap["game"], boss_cap["games"] = gid, boss_cap["games"] + 1
+                        log(f"頭目戰開始存截圖（logs\\boss，這次啟動第 {boss_cap['games']} 場）")
+                    if boss_cap["game"] == gid:
+                        boss_cap["next"] = now + 1.0
+                        save_boss_shot(frame, gid + 1)
                 # 鏡頭位移 → 角色在地圖上的位置（用來記住撞過的地方、鐘的位置）
                 moved = None
                 if bst.get("prev") is not None and bst["prev"].shape == frame.shape:
