@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.16"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.17"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -308,6 +308,8 @@ DEFAULT_CONFIG = {
         "start_button_pos": [0.786, 0.743],
         "field_button": "前往野外",
         "learn_route": True,
+        "click_move": True,          # 點主持人讓遊戲自己走過去（遊戲內建尋路，不會亂走）
+        "zoom_out": 10,              # 進城鎮後滾輪拉遠幾格，從出生點就看得到主持人（0 = 不調整）
         "mode": "festival",          # festival = 節慶主持人（原本的關卡）；expedition = 遠征隊長
         "stage": "普隆德拉原野",       # 遠征要刷的關卡
         "difficulty": "keep",          # 出發前的難度：keep 不調整、min 最簡單、max 最難
@@ -2558,7 +2560,7 @@ def save_route(tst, frame_shape):
     """成功走到主持人 → 把這次從出生點走過去的路線記下來（比之前記的好才換）"""
     trail = tst.get("trail") or []
     npc = tst.get("npc_world")
-    if not tst.get("fresh") or len(trail) < 3 or npc is None:
+    if not tst.get("fresh") or len(trail) < 3 or npc is None or tst.get("zoomed"):
         return
     length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(trail, trail[1:]))
     cand = {"points": [[round(x, 1), round(y, 1)] for x, y in trail], "npc": [npc[0], npc[1]],
@@ -2631,7 +2633,8 @@ def town_reset(tst):
               "route_on_success", "npc_w_reached",
               "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir",
               "path_w", "plan_t", "plan_tgt", "move_since", "last_dir",
-              "spawn_moved", "guess_used", "spiral_t0"):
+              "spawn_moved", "guess_used", "spiral_t0",
+              "zoom_done", "zoomed", "click_next", "click_n", "click_fail", "click_d", "click_logged"):
         tst.pop(k, None)
     tst.update(world=(0.0, 0.0), trail=[(0.0, 0.0)], fresh=True, stuck_total=0, stuck_n=0)
 
@@ -2799,7 +2802,8 @@ def town_ocr(frame, rect, cfg, inp, tst):
         wx_, wy_ = tst.get("world", (0.0, 0.0))
         npc_w = (wx_ + tst["target"][0] - flc[0], wy_ + tst["target"][1] - flc[1])
         tst["npc_world"] = npc_w
-        rt = load_route() if tc.get("learn_route", True) else None
+        # 城鎮拉遠視野後距離比例不一樣，舊的路線不能用
+        rt = load_route() if tc.get("learn_route", True) and not tst.get("zoomed") else None
         if rt and tst.get("fresh") and rt.get("size") == [W, H]:
             off = (npc_w[0] - rt["npc"][0], npc_w[1] - rt["npc"][1])
             if not tst.get("route_checked"):
@@ -2872,6 +2876,43 @@ def _town_stuck(tst, now, world, step_dir):
     return det
 
 
+def town_click(frame, rect, cfg, inp, tst, now, lc):
+    """點主持人：遊戲會自己找路走過去（繞過噴水池、花圃）。
+    回傳 None = 交給遊戲走、程式不按方向鍵；False = 點擊沒用，改回自己走"""
+    tc = cfg["town"]
+    target = tst.get("target")
+    if target is None or tst.get("click_fail", 0) >= 4:
+        return False
+    d = math.hypot(target[0] - lc[0], target[1] - lc[1])
+    if d < 28:
+        return None
+    if now < tst.get("click_next", 0):
+        return None
+    # 上次點了之後幾乎沒有靠近 → 算一次失敗（被擋住、點到不能走的地方）
+    if tst.get("click_d") is not None and d > tst["click_d"] - 15:
+        tst["click_fail"] = tst.get("click_fail", 0) + 1
+        if tst["click_fail"] >= 4:
+            log("點主持人好像沒有作用 → 改成自己走過去")
+            return False
+    elif tst.get("click_d") is not None:
+        tst["click_fail"] = 0
+    tst["click_d"] = d
+    off = tc.get("npc_body_offset", 75) * 0.5
+    cx, cy = target[0], target[1] - off
+    ox, oy = rect[0], rect[1]
+    MOVER.set(None, False)
+    if not tst.get("click_logged"):
+        log(f"點{tc.get('npc_name', '節慶主持人')}，讓角色自己走過去（距離約 {d:.0f} 像素）")
+        tst["click_logged"] = True
+    inp.click_item({"text": tc.get("npc_name", "節慶主持人"), "x": ox + cx - 6, "y": oy + cy - 6,
+                    "w": 12, "h": 12}, tc.get("npc_name", "節慶主持人"))
+    park_mouse(rect)
+    tst["click_n"] = tst.get("click_n", 0) + 1
+    tst["click_next"] = now + (2.5 if d > 200 else 1.6)
+    tst["ocr_next"] = min(tst.get("ocr_next", now + 1), now + 1.0)
+    return None
+
+
 def town_step(frame, rect, cfg, inp, tst):
     """城鎮每一格畫面：追蹤主持人位置、規劃路線，回傳移動方向或 None"""
     tc = cfg["town"]
@@ -2931,6 +2972,21 @@ def town_step(frame, rect, cfg, inp, tst):
     if now < tst.get("cooldown_until", 0):
         return None
 
+    # 剛進城鎮：滾輪拉遠視野，從出生點就看得到主持人
+    if not tst.get("zoom_done"):
+        tst["zoom_done"] = True
+        zn = int(tc.get("zoom_out", 10) or 0)
+        if zn and tc.get("click_move", True):
+            MOVER.set(None, False)
+            log(f"城鎮拉遠視野（滾輪 {zn} 格）")
+            inp.scroll(rect[0] + W * 0.5, rect[1] + H * 0.45, zn, "城鎮拉遠視野")
+            park_mouse(rect)
+            tst["zoomed"] = True
+            tst["prev"] = None
+            tst["ocr_next"] = 0
+            time.sleep(0.5)
+            return None
+
     # 定期讀字（讀字時先停下來，避免衝過頭）；離主持人還很遠時少讀幾次，走路比較順
     if now >= tst.get("ocr_next", 0) or tst.get("target") is None:
         MOVER.set(None, False)
@@ -2954,6 +3010,12 @@ def town_step(frame, rect, cfg, inp, tst):
         if r == "acted":
             return None
 
+    # 看得到主持人 → 點他，讓遊戲自己走過去
+    if tc.get("click_move", True):
+        rc = town_click(frame, rect, cfg, inp, tst, now, lc)
+        if rc is not False:
+            return rc
+
     if now < tst.get("detour_until", 0):
         return tst["detour"]
 
@@ -2962,7 +3024,8 @@ def town_step(frame, rect, cfg, inp, tst):
         if tst.get("last_dir") and now - tst.get("last_seen", 0) < 2.5:
             return tst["last_dir"]
         npc_w = tst.get("npc_world")
-        if npc_w is None and not tst.get("guess_used") and tc.get("learn_route", True):
+        if npc_w is None and not tst.get("guess_used") and tc.get("learn_route", True) \
+                and not tst.get("zoomed"):
             rt_ = load_route()
             H_, W_ = frame.shape[:2]
             if rt_ and rt_.get("size") == [W_, H_] and rt_.get("npc"):
