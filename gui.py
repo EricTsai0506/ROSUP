@@ -138,6 +138,7 @@ class App:
         c["chest"]["priority"] = list(self.chest_order)
         c["chest"]["prefer_rarity"] = self.v_chest_rarity.get()
         c["move"]["enabled"] = self.v_move.get()
+        c["move"]["boss_dodge"] = self.v_dodge.get()
         loop = self.v_loop.get()
         for k in ("result", "lobby", "town"):
             c[k]["enabled"] = loop
@@ -209,6 +210,7 @@ class App:
         self.v_lv = tk.BooleanVar()
         self.v_chest = tk.BooleanVar()
         self.v_move = tk.BooleanVar()
+        self.v_dodge = tk.BooleanVar()
         self.v_loop = tk.BooleanVar()
         self.v_snap = tk.BooleanVar()
         ttk.Label(f1, text="遊戲視窗標題（部分文字即可）").grid(row=0, column=0, sticky="w")
@@ -238,6 +240,7 @@ class App:
             (self.v_lv, "升級自動選技能"),
             (self.v_chest, "寶箱自動選裝備"),
             (self.v_move, "自動走位撿東西"),
+            (self.v_dodge, "頭目（MVP）出現時閃避地上的紅色預警範圍"),
             (self.v_loop, "自動循環（結算 → 大廳 → 主持人 → 開始遊戲 → 前往野外）"),
             (self.v_snap, "儲存除錯截圖到 logs"),
         ]
@@ -454,6 +457,7 @@ class App:
         self.v_lv.set(c["levelup"]["enabled"])
         self.v_chest.set(c["chest"]["enabled"])
         self.v_move.set(c["move"]["enabled"])
+        self.v_dodge.set(c["move"].get("boss_dodge", True))
         self.v_loop.set(c["result"]["enabled"] and c["lobby"]["enabled"] and c["town"]["enabled"])
         self.v_route.set(c["town"].get("learn_route", True))
         if c["town"].get("mode") == "expedition":

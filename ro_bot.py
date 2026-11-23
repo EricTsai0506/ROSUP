@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.4"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.5"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -335,6 +335,8 @@ DEFAULT_CONFIG = {
         "boss_capture_games": 3,     # 打頭目時每秒存一張截圖（logs\\boss），每次啟動存幾場（0 = 不存）
         "boss_capture_from": 830,    # 計時到幾秒開始存（830 = 13:50）
         "magnet_first": True,        # 小地圖上附近有磁鐵就先去撿（畫面上有寶箱時還是先撿寶箱）
+        "boss_dodge": True,          # 頭目（MVP）出現時：看地上紅色預警範圍，站在裡面就躲出去、走路不踩進去
+        "end_capture": 5,            # 一局提早結束（還沒到 13:50 就結束，多半是角色倒下）→ 存最後 20 秒截圖，每次啟動存幾場
     },
     "browser": {
         "mode": "cdp",
@@ -1679,13 +1681,32 @@ class OcrWatcher(threading.Thread):
                     # 頭目機制：「躲到鐘下！」
                     if any(k in i["n"] for i in items for k in ("钟下", "躲到", "到钟")):
                         upd["bell_t"] = upd["t"]
+                    # 頭目（MVP）出現：上方有「MVP 名字」和頭目血條
+                    for i in items:
+                        if "mvp" in i["n"]:
+                            upd["mvp_t"] = upd["t"]
+                            nm_ = re.sub(r"(?i)mvp|出現了|出现了|[!！\s]", "", i["text"])
+                            if not nm_:
+                                nx_ = [j for j in items if j is not i and abs(j["cy"] - i["cy"]) < i["h"]
+                                       and 0 < j["x"] - (i["x"] + i["w"]) < i["h"] * 3]
+                                if nx_:
+                                    nm_ = re.sub(r"出現了|出现了|[!！\s]", "", nx_[0]["text"])
+                            if nm_:
+                                upd["mvp_name"] = nm_[:8]
+                            break
                     now = time.time()
                     if now >= self.__dict__.get("lv_next", 0):
                         self.lv_next = now + 1.5
                         lsub = grab(sct, (x, y, max(10, int(W * 0.3)), max(10, int(H * 0.12))))
-                        lv_ = read_char_level(ocr(lsub, engine="bg"))
+                        litems = ocr(lsub, engine="bg")
+                        lv_ = read_char_level(litems)
                         if lv_ is not None:
                             upd["char_lv"], upd["char_lv_t"] = lv_, now
+                        for i in litems:      # 左上角 HP「466 / 466」
+                            mh = re.match(r"^\s*(\d{1,6})\s*/\s*(\d{1,6})\s*$", i["text"])
+                            if mh and 0 < int(mh.group(2)) and int(mh.group(1)) <= int(mh.group(2)):
+                                upd["hp"], upd["hp_max"], upd["hp_t"] = int(mh.group(1)), int(mh.group(2)), now
+                                break
                     if self.cfg["move"]["stuck_check"] and now >= coord_next:
                         coord_next = now + 1.2
                         cx0, cy0, cx1, cy1 = self.cfg["coord_region"]
@@ -1763,13 +1784,13 @@ def save_snapshot(frame, name, coins=(), chests=(), center=None, d=None, items=(
             pass
 
 
-def save_boss_shot(frame, game_no):
+def save_boss_shot(frame, game_no, prefix="boss"):
     """頭目戰截圖存到 logs\\boss（最多留 600 張，舊的自動刪）"""
     try:
         d = os.path.join(LOG_DIR, "boss")
         os.makedirs(d, exist_ok=True)
         t = time.time()
-        path = os.path.join(d, time.strftime(f"boss_g{game_no:03d}_%H%M%S", time.localtime(t))
+        path = os.path.join(d, time.strftime(f"{prefix}_g{game_no:03d}_%H%M%S", time.localtime(t))
                             + f"_{int(t * 10) % 10}.jpg")
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
@@ -1779,6 +1800,50 @@ def save_boss_shot(frame, game_no):
             os.remove(os.path.join(d, f))
     except Exception as e:
         log(f"頭目截圖存檔失敗：{e}")
+
+
+END_RING = []          # 最近 20 秒的畫面（JPEG），一局提早結束時存下來看是怎麼倒下的
+END_CAP = {"games": 0}
+
+
+def ring_push(frame, now):
+    if END_RING and now - END_RING[-1][0] < 1.0:
+        return
+    try:
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            END_RING.append((now, buf))
+            del END_RING[:-20]
+    except Exception:
+        pass
+
+
+def dump_end_ring(cfg, result_frame=None):
+    """結果畫面出現時呼叫：還沒打到最後頭目就結束 → 把最後 20 秒存到 logs\\boss\\end_*"""
+    try:
+        mt = GAME.get("max_timer", 0)
+        hp = GAME.get("last_hp")
+        hp_s = f"、最後看到的 HP {hp[0]}/{hp[1]}" if hp else ""
+        log(f"這局計時最多到 {mt // 60}:{mt % 60:02d}{hp_s}")
+        if mt >= cfg["move"].get("boss_capture_from", 830) or not END_RING:
+            return
+        if END_CAP["games"] >= int(cfg["move"].get("end_capture", 5) or 0):
+            return
+        END_CAP["games"] += 1
+        d = os.path.join(LOG_DIR, "boss")
+        os.makedirs(d, exist_ok=True)
+        tag = time.strftime("end_%m%d_%H%M%S")
+        for k, (t, buf) in enumerate(END_RING):
+            buf.tofile(os.path.join(d, f"{tag}_{k:02d}.jpg"))
+        if result_frame is not None:
+            ok, buf = cv2.imencode(".jpg", result_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                buf.tofile(os.path.join(d, f"{tag}_result.jpg"))
+        log(f"這局提早結束（可能角色倒下）→ 最後 {len(END_RING)} 秒的畫面存在 logs\\boss\\{tag}_*.jpg")
+    except Exception as e:
+        log(f"結束前截圖存檔失敗：{e}")
+    finally:
+        END_RING.clear()
 
 
 def save_image(img, name):
@@ -2934,6 +2999,8 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
                 save_snapshot(frame, f"menu_{kind}_nobutton", items=rel)
             time.sleep(0.5)
             return True
+        if kind == "result" and not GAME.get("game_counted"):
+            dump_end_ring(cfg, frame)
         log(f"{label} → 按「{sec['button']}」")
         inp.click_item(btn)
         GAME["phase"] = "town"
@@ -3494,6 +3561,13 @@ def run(cfg):
             mmap = _mmod.MiniMap(BASE_DIR, keys=mcfg.get("mode", "keys") == "keys", log=log)
         except Exception as e:
             log(f"小地圖功能載入失敗（照舊走路）：{e}")
+    dodger = None
+    if mcfg.get("boss_dodge", True):
+        try:
+            import boss as _boss
+            dodger = _boss.BossDodge()
+        except Exception as e:
+            log(f"頭目閃避功能載入失敗：{e}")
     MOVER = Mover(mcfg, dry)
     MOVER.start()
     watcher = OcrWatcher(cfg)
@@ -3644,7 +3718,8 @@ def run(cfg):
                     GAME["timer_t"] = res["t"]
                     GAME["max_timer"] = max(GAME.get("max_timer", 0), tmr)
                 ending = tmr is not None and GAME.get("max_timer", 0) >= 300 \
-                    and tmr <= lvc.get("stop_before_end_sec", 25)
+                    and tmr <= lvc.get("stop_before_end_sec", 25) \
+                    and now - max(res.get("mvp_t", 0), GAME.get("bar_t", 0)) > 4  # 頭目還在（頭目戰的 2 分鐘倒數）不算
                 if ending and not GAME.get("ending_logged"):
                     log("Boss 已打完、進入最後倒數，不再升級")
                     GAME["ending_logged"] = True
@@ -3695,7 +3770,9 @@ def run(cfg):
                     last_coord, coord_same_since = None, now
                     bumps = 0
                     battle_t0 = now
-                    GAME.update(bell_ep=None, bells_done=[], bell_count=0)
+                    GAME.update(bell_ep=None, bells_done=[], bell_count=0, mvp_logged=False, last_hp=None)
+                    if dodger:
+                        dodger.stats['dodge'] = 0
                     with watcher.lock:              # 上一場的地圖名稱不要帶到這一場
                         watcher.res.pop("map_name", None)
                         watcher.last_map = None
@@ -3801,8 +3878,25 @@ def run(cfg):
                 lc = (W / 2 + mcfg["character_offset"][0], H / 2 + mcfg["character_offset"][1])
                 center = (ox + lc[0], oy + lc[1])
                 # 頭目戰截圖：之後拿來分析頭目的招式、做閃避策略
-                if mcfg.get("boss_capture_games", 3) and GAME.get("max_timer", 0) >= \
-                        mcfg.get("boss_capture_from", 830) and not GAME.get("ending_logged") \
+                ring_push(frame, now)
+                if dodger is not None and now >= GAME.get("bar_next", 0):
+                    GAME["bar_next"] = now + 0.5
+                    try:
+                        if _boss.boss_bar(frame):
+                            GAME["bar_t"] = now
+                    except Exception:
+                        pass
+                mvp_on = now - max(res.get("mvp_t", 0), GAME.get("bar_t", 0)) < 6.0
+                if res.get("hp") is not None and now - res.get("hp_t", 0) < 5:
+                    GAME["last_hp"] = (res["hp"], res["hp_max"])
+                if mvp_on and not GAME.get("mvp_logged"):
+                    GAME["mvp_logged"] = True
+                    nm_ = res.get("mvp_name") or "頭目"
+                    t_ = GAME.get("max_timer", 0)
+                    log(f"MVP {nm_} 出現（計時 {t_ // 60}:{t_ % 60:02d}）"
+                        + ("→ 開始閃避地上的紅色預警範圍" if dodger else ""))
+                if mcfg.get("boss_capture_games", 3) and (mvp_on or GAME.get("max_timer", 0) >=
+                        mcfg.get("boss_capture_from", 830)) and not GAME.get("ending_logged") \
                         and now >= boss_cap["next"]:
                     gid = GAME.get("games_done", 0)
                     if boss_cap["game"] != gid and boss_cap["games"] < mcfg.get("boss_capture_games", 3):
@@ -3845,6 +3939,31 @@ def run(cfg):
                         MOVER.set(None, False)
                     time.sleep(0.05)
                     continue
+                # 頭目（MVP）在場：地上的紅色預警範圍 → 站在裡面就往最近的安全處走
+                dodge_on = dodger is not None and not dry and mvp_on
+                if dodge_on:
+                    dodger.update(frame, now)
+                    wall_ok = None
+                    if mm_ok:
+                        wall_ok = lambda v, dist_: mmap.free_dist(v, min(_mmod.LOOK, dist_ / (
+                            mmap.scale or _mmod.DEFAULT_SCALE) + 1)) >= min(_mmod.LOOK, dist_ / (
+                            mmap.scale or _mmod.DEFAULT_SCALE)) - 0.01
+                    esc_ = dodger.escape(lc, now, wall_ok=wall_ok, prefer=d)
+                    if esc_ is not None:
+                        d = esc_[0]
+                        if dodger.stats["dodge"] == 1 or now >= GAME.get("dodge_log_next", 0):
+                            GAME["dodge_log_next"] = now + 10
+                            log(f"踩到頭目的紅色預警範圍 → 往安全的地方躲（約 {esc_[1]} 像素）")
+                        if boss_cap["game"] == GAME.get("games_done", 0) and now >= GAME.get("dodge_img_next", 0):
+                            GAME["dodge_img_next"] = now + 1.0
+                            try:
+                                save_boss_shot(dodger.debug_image(frame, lc, d), GAME.get("games_done", 0) + 1,
+                                               "dodge")
+                            except Exception:
+                                pass
+                        MOVER.set(d, True, center)
+                        time.sleep(0.03)
+                        continue
                 if hold_on:
                     if not GAME.get("hold_logged"):
                         m_, s_ = divmod(int(hold), 60)
@@ -3979,6 +4098,8 @@ def run(cfg):
                         need = math.hypot(planner.target[0] - lc[0], planner.target[1] - lc[1]) / \
                             (mmap.scale or _mmod.DEFAULT_SCALE)
                     d = mmap.steer(d, need)
+                if dodge_on:        # 頭目在場：要走的方向會踩進紅色預警 → 轉個方向
+                    d = dodger.veto(d, lc)
                 MOVER.set(d, True, center)
 
                 if cfg["debug_snapshots"] and mmap and now >= mm_snap_next:
