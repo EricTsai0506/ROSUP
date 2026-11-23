@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.17"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.18"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2634,7 +2634,7 @@ def town_reset(tst):
               "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir",
               "path_w", "plan_t", "plan_tgt", "move_since", "last_dir",
               "spawn_moved", "guess_used", "spiral_t0",
-              "zoom_done", "zoomed", "click_next", "click_n", "click_fail", "click_d", "click_logged"):
+              "zoom_done", "zoomed", "click_next", "click_hold_until", "label_h", "click_n", "click_fail", "click_d", "click_logged"):
         tst.pop(k, None)
     tst.update(world=(0.0, 0.0), trail=[(0.0, 0.0)], fresh=True, stuck_total=0, stuck_n=0)
 
@@ -2775,6 +2775,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
         inp.press(tc["talk_key"])
         tst["cooldown_until"] = time.time() + tc["talk_cooldown"]
         tst["expect_start_until"] = time.time() + 10
+        tst["click_hold_until"] = time.time() + 12     # 已經到主持人旁邊了，不要再點（會把對話框點掉、點到別的 NPC）
         tst["target"] = None
         tst["last_dir"] = None          # 按完空白鍵不要再往前走
         tst["hist"], tst["move_since"] = [], None
@@ -2796,6 +2797,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
         lc = (W / 2, H / 2)
         lab = min(labels, key=lambda i: math.hypot(i["cx"] - ox - lc[0], i["cy"] - oy - lc[1]))
         tst["target"] = (lab["cx"] - ox, lab["cy"] - oy + tc["npc_body_offset"])
+        tst["label_h"] = lab["h"]
         tst["last_seen"] = time.time()
         # 主持人在地圖上的位置（以出生點為原點）
         flc = (W / 2, H / 2 + tc.get("feet_offset", 30))
@@ -2877,14 +2879,23 @@ def _town_stuck(tst, now, world, step_dir):
 
 
 def town_click(frame, rect, cfg, inp, tst, now, lc):
-    """點主持人：遊戲會自己找路走過去（繞過噴水池、花圃）。
+    """點主持人頭上名字的正下方：遊戲會自己找路走過去（繞過噴水池、花圃）。
     回傳 None = 交給遊戲走、程式不按方向鍵；False = 點擊沒用，改回自己走"""
     tc = cfg["town"]
     target = tst.get("target")
     if target is None or tst.get("click_fail", 0) >= 4:
         return False
-    d = math.hypot(target[0] - lc[0], target[1] - lc[1])
-    if d < 28:
+    # 剛按過空白鍵、正在等「開始遊戲」→ 什麼都不點（之前會把對話框點掉、點到遠征隊長）
+    if now < tst.get("click_hold_until", 0) or now < tst.get("expect_start_until", 0):
+        return None
+    H, W = frame.shape[:2]
+    off = tc.get("npc_body_offset", 75)
+    lh = tst.get("label_h", 18)
+    lx, ly = target[0], target[1] - off             # 名字標籤的位置
+    cx, cy = lx, ly + lh * 1.6                      # 名字正下方 = 主持人頭的位置
+    # 角色在畫面中間；名字已經在角色頭上附近 → 到了，等交談提示，不要再點
+    d = math.hypot(lx - W / 2, ly - (H / 2 - lh * 3))
+    if d < max(70, lh * 4):
         return None
     if now < tst.get("click_next", 0):
         return None
@@ -2897,19 +2908,17 @@ def town_click(frame, rect, cfg, inp, tst, now, lc):
     elif tst.get("click_d") is not None:
         tst["click_fail"] = 0
     tst["click_d"] = d
-    off = tc.get("npc_body_offset", 75) * 0.5
-    cx, cy = target[0], target[1] - off
     ox, oy = rect[0], rect[1]
     MOVER.set(None, False)
     if not tst.get("click_logged"):
         log(f"點{tc.get('npc_name', '節慶主持人')}，讓角色自己走過去（距離約 {d:.0f} 像素）")
         tst["click_logged"] = True
-    inp.click_item({"text": tc.get("npc_name", "節慶主持人"), "x": ox + cx - 6, "y": oy + cy - 6,
-                    "w": 12, "h": 12}, tc.get("npc_name", "節慶主持人"))
+    inp.click_item({"text": tc.get("npc_name", "節慶主持人"), "x": ox + cx - 5, "y": oy + cy - 5,
+                    "w": 10, "h": 10}, tc.get("npc_name", "節慶主持人"))
     park_mouse(rect)
     tst["click_n"] = tst.get("click_n", 0) + 1
-    tst["click_next"] = now + (2.5 if d > 200 else 1.6)
-    tst["ocr_next"] = min(tst.get("ocr_next", now + 1), now + 1.0)
+    tst["click_next"] = now + (3.0 if d > 250 else 2.0)
+    tst["ocr_next"] = min(tst.get("ocr_next", now + 1), now + 0.8)
     return None
 
 
