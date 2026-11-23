@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.11"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.12"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -247,6 +247,7 @@ DEFAULT_CONFIG = {
         "fourth_skill": "",
         "banish_fourth": True,
         "banish": ["聖靈召喚", "心靈爆破", "火焰之壁", "冰凍術", "火狩", "雷爆術", "攻擊：屬性附加"],
+        "banish_all_listed": False,  # true = 放逐清單裡的技能出現都放逐（次數會不夠放逐攻擊：屬性附加）
         "auto_after_banish": False,  # 放逐完後改按遊戲的「自動」選技能（預設不按）
         "throwaway_until_level": 3,
         "target_until_level": 11,
@@ -2235,8 +2236,10 @@ def handle_levelup(cards, items, sec, inp, st):
         c["pri"] = any(match(t, k) for k in sec["priority"])
         c["listed"] = any(similar(t, k) for k in sec.get("banish", []))
         c["always"] = c["listed"] and any(similar(t, k) for k in ALWAYS_BANISH)
+        # 放逐次數很少（通常一局 2 次）→ 只放逐「第四技能」和「攻擊：屬性附加」；
+        # 放逐清單裡的其他技能不放逐，只是不選它（banish_all_listed = true 才會全部放逐）
         c["four"] = (bool(fourth) and sec.get("banish_fourth", True) and similar(t, fourth)) \
-            or c["listed"]
+            or c["always"] or (c["listed"] and sec.get("banish_all_listed", False))
 
     lv = read_level(items)
     early_lv = lv if lv is not None else GAME.get("levelups", 0) + 2
@@ -3230,7 +3233,7 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     # 上次按了重抽／放逐，同一個位置的卡片還是同一張（文字辨識可能有點不同）→ 沒有作用
     la = st.get("chest_last")
     if la and time.time() - la["t"] < 8:
-        cs = sorted(cards, key=lambda c: c["cx"])
+        cs = sorted(cards, key=lambda c: c["title"]["cx"])
         same = la["idx"] < len(cs) and similar(cs[la["idx"]]["title"]["text"], la["title"])
         if same:
             GAME[la["kind"] + "_fail"] = GAME.get(la["kind"] + "_fail", 0) + 1
@@ -3241,7 +3244,7 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     st["chest_last"] = None
 
     def remember(kind, c):
-        cs = sorted(cards, key=lambda x: x["cx"])
+        cs = sorted(cards, key=lambda x: x["title"]["cx"])
         st["chest_last"] = {"kind": kind, "t": time.time(), "idx": cs.index(c),
                             "title": c["title"]["text"], "sig": sig}
 

@@ -642,18 +642,34 @@ class App:
         self.thread.start()
 
     def worker(self, cfg):
-        try:
-            rb.run(cfg)
-        except rb.FailSafe:
-            rb.log("已觸發緊急停止（滑鼠在左上角）")
-        except Exception:
-            tb = traceback.format_exc()
-            rb.log("發生錯誤：\n" + tb)
+        crashes = []
+        while True:
             try:
-                with open(os.path.join(rb.LOG_DIR, "error.txt"), "w", encoding="utf-8") as f:
-                    f.write(tb)
+                rb.run(cfg)
+            except rb.FailSafe:
+                rb.log("已觸發緊急停止（滑鼠在左上角）")
             except Exception:
-                pass
+                tb = traceback.format_exc()
+                rb.log("發生錯誤：\n" + tb)
+                try:
+                    with open(os.path.join(rb.LOG_DIR, "error.txt"), "w", encoding="utf-8") as f:
+                        f.write(tb)
+                except Exception:
+                    pass
+                # 程式出錯不要整個停掉：10 分鐘內出錯 5 次以內就自動重新開始
+                now = time.time()
+                crashes = [t for t in crashes if now - t < 600] + [now]
+                if len(crashes) <= 5 and not rb.CONTROL.get("stop"):
+                    rb.log(f"5 秒後自動重新開始（10 分鐘內第 {len(crashes)} 次出錯）")
+                    for _ in range(50):
+                        if rb.CONTROL.get("stop"):
+                            break
+                        time.sleep(0.1)
+                    if not rb.CONTROL.get("stop"):
+                        continue
+                else:
+                    rb.log("短時間內出錯太多次，先停下來；請把 logs\\error.txt 傳給開發者")
+            break
         rb.log("已停止")
 
     def show_chest(self, select=None):
