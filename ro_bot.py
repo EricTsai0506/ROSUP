@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.20"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.5.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -156,17 +156,17 @@ _CHEST_RAW = [
         ("廣域藥水（近戰）", "+10% 近戰距離 → +20% 近戰距離（只限近戰流派）"),
         ("傷害藥水", "+18% 傷害 → +40% 傷害"),
     ]),
-    ("靈藥", [
-        ("爆擊靈藥", "+1% 爆擊 → +5% 爆擊"),
-        ("傷害靈藥", "+10% 傷害 → +20% 傷害"),
-        ("生命靈藥", "+15 最大 HP → +30 最大 HP"),
+    ("秘藥", [
+        ("爆擊秘藥", "+1% 爆擊 → +5% 爆擊"),
+        ("傷害秘藥", "+10% 傷害 → +20% 傷害"),
+        ("生命秘藥", "+15 最大 HP → +30 最大 HP"),
         ("爆擊傷害藥劑", "+18% 爆擊傷害 → +40% 爆擊傷害"),
-        ("驚奇靈藥", "+10% 尋寶率 → +20% 尋寶率"),
+        ("驚奇秘藥", "+10% 尋寶率 → +20% 尋寶率"),
         ("持續傷害藥劑", "中毒、燃燒與出血傷害 +10% → +20%（僅在已造成中毒、燃燒或出血後）"),
         ("迴避秘藥", "+1% 迴避（Flee）→ +5% 迴避"),
-        ("詠唱靈藥", "+6 詠唱速度 → +15 詠唱速度"),
-        ("廣域靈藥", "+10% 範圍 → +20% 範圍"),
-        ("護甲靈藥", "-1% 承受傷害 → -5% 承受傷害"),
+        ("詠唱秘藥", "+6 詠唱速度 → +15 詠唱速度"),
+        ("廣域秘藥", "+10% 範圍 → +20% 範圍"),
+        ("護甲秘藥", "-1% 承受傷害 → -5% 承受傷害"),
     ]),
     ("祝福", [
         ("傷害祝福", "+18% 傷害 → +40% 傷害"),
@@ -201,13 +201,21 @@ _CHEST_RAW = [
     ]),
 ]
 CHEST_ITEMS = [(name, eff) for _, lst in _CHEST_RAW for name, eff in lst]
+RENAMED_17 = {"爆擊靈藥": "爆擊秘藥", "傷害靈藥": "傷害秘藥", "生命靈藥": "生命秘藥", "驚奇靈藥": "驚奇秘藥",
+              "詠唱靈藥": "詠唱秘藥", "廣域靈藥": "廣域秘藥", "護甲靈藥": "護甲秘藥"}
+# 卡片標題沒讀到（讀成下面的說明）時，用說明裡的關鍵字認出是哪個寶箱
+CHEST_KEYWORDS = [("火球術", "火箭術"), ("累積冰霜", "冰箭術"), ("連鎖閃電", "雷擊術"),
+                  ("吸魂術", "聖靈召喚"), ("念力連擊", "心靈爆破"), ("火柱", "火焰之壁"),
+                  ("冰凍爆發", "冰凍術"), ("火之獵殺", "火狩"), ("怒雷強擊", "雷爆術"),
+                  ("拾取範圍", "採集藥水"), ("吸血", "吸血祝福"), ("雙倍投擲", "雙倍投擲祝福"),
+                  ("經驗值", "智慧之神"), ("移動速度", "速度藥水")]
 CHEST_CATEGORY = {name: cat for cat, lst in _CHEST_RAW for name, _ in lst}
 
 
 # 預設排在最前面的寶箱（依序）
 CHEST_TOP = ["思想之神", "處刑之神", "戰爭之神", "火箭術", "冰箭術", "雷擊術", "採集藥水", "冷卻祝福", "冷卻藥水",
-             "傷害祝福", "傷害藥水", "傷害靈藥", "爆擊靈藥", "爆擊傷害藥劑",
-             "詠唱藥水", "詠唱靈藥", "詠唱祝福"]
+             "傷害祝福", "傷害藥水", "傷害秘藥", "爆擊秘藥", "爆擊傷害藥劑",
+             "詠唱藥水", "詠唱秘藥", "詠唱祝福"]
 
 
 def chest_default_order(current=None):
@@ -232,7 +240,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 16,
+    "config_version": 17,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -324,6 +332,7 @@ DEFAULT_CONFIG = {
         "max_reroll": 0,
         "reroll_rank": 10,           # 卡片排名在前 N 名之外 → 按那張卡下面的「重抽」（0 = 不重抽）
         "reroll_limit": 6,           # 每個寶箱選單最多重抽幾次
+        "new_item_rank": 10,         # 道具欄還沒滿時，新道具要在前 N 名內才拿（新道具會永久佔一格）；0 = 不限制
         "banish_rank": 0,            # 卡片排名在前 N 名之外 → 按「放逐」（0 = 不放逐）；技能放逐完才會做
         "prefer_rarity": True,
         "auto": False,               # true = 寶箱直接按遊戲的「自動寶箱」（預設不按，照優先順序選）
@@ -355,9 +364,13 @@ DEFAULT_CONFIG = {
         "magnet_first": True,        # 小地圖上附近有磁鐵就先去撿（畫面上有寶箱時還是先撿寶箱）
         "boss_dodge": True,          # 頭目（MVP）出現時：看地上紅色預警範圍，站在裡面就躲出去、走路不踩進去
         "boss_kite": True,           # 頭目戰：不追遠處的寶箱／磁鐵，一直在空曠的地方繞圈移動
-        "boss_times": [180, 300, 420, 600, 720, 840],   # 頭目出現的遊戲時間（秒）：3、5、7、10、12、14 分
+        "boss_times": [150, 330, 450, 630, 750, 840],   # 頭目出現的遊戲時間（秒）：約 2:30、5:30、7:30、10:30、12:30、14:00
+        "boss_kite_hp": 0.85,        # 一般頭目在場時 HP 低於這個比例才改成繞圈躲（滿血照常撿東西）
         "boss_prep_sec": 10,         # 頭目出現前幾秒先走到空曠的地方、開始繞圈
         "low_hp_kite": 0.4,          # HP 低於這個比例 → 不撿東西，先繞圈躲（0 = 不用）
+        "crowd_kite": True,          # 「一大群怪物包圍」或 HP 幾秒內掉很多 → 往怪少、空曠的地方跑
+        "hp_drop_kite": 0.15,        # 4.5 秒內掉超過最大 HP 的這個比例就跑
+        "crowd_level": 0.55,         # 周圍「在動的東西」比例超過這個（而且掉血中）就當成被圍住
         "end_capture": 5,            # 一局提早結束（還沒到 13:50 就結束，多半是角色倒下）→ 存最後 20 秒截圖，每次啟動存幾場
     },
     "browser": {
@@ -445,7 +458,13 @@ def migrate_config(cfg, ver=None):
     if ver < 16:  # 「Flee（迴避）秘藥」卡片上寫的是「迴避秘藥」
         cfg["chest"]["priority"] = ["迴避秘藥" if n == "Flee（迴避）秘藥" else n
                                     for n in cfg["chest"].get("priority", [])]
-    cfg["config_version"] = 16
+    if ver < 17 and cfg.get("move", {}).get("boss_times") == [180, 300, 420, 600, 720, 840]:
+        cfg["move"]["boss_times"] = [150, 330, 450, 630, 750, 840]   # 依實際紀錄調整頭目出現時間
+    if ver < 17:  # 遊戲把「靈藥」改名「秘藥」（卡片上是「驚奇秘藥」「生命秘藥」）
+        ren = RENAMED_17
+        for key in ("priority", "avoid"):
+            cfg["chest"][key] = [ren.get(n, n) for n in cfg["chest"].get(key, [])]
+    cfg["config_version"] = 17
     return cfg
 
 
@@ -487,6 +506,13 @@ def log(*a):
             os.makedirs(LOG_DIR, exist_ok=True)
             _logf = open(os.path.join(LOG_DIR, time.strftime("bot_%Y%m%d_%H%M%S.log")),
                          "w", encoding="utf-8")
+            # 紀錄檔只留最新 40 個，舊的自動刪掉（不然 logs 資料夾會越來越大）
+            try:
+                olds = sorted(f for f in os.listdir(LOG_DIR) if f.startswith("bot_") and f.endswith(".log"))
+                for f in olds[:-40]:
+                    os.remove(os.path.join(LOG_DIR, f))
+            except Exception:
+                pass
         _logf.write(s + "\n")
         _logf.flush()
     except Exception:
@@ -539,6 +565,45 @@ KNOWN_SKILLS = ["火箭術", "冰箭術", "雷擊術", "雷爆術", "聖靈召�
                 "攻擊：屬性附加", "冰凍術", "火焰之壁", "火球術", "暴風雪", "隕石術",
                 "地震術", "石化術", "冰刃之牆", "怒雷強擊", "火焰術", "冰霜術", "雷鳴術",
                 "聖光術", "治癒術", "加速術", "魔法盾"]
+
+
+# 新技能卡上有英文名稱「(Thunderstorm) · 範圍 · 詠唱 0.6 s」，比中文標題好認
+EN_SKILLS = {"firebolt": "火箭術", "coldbolt": "冰箭術", "lightningbolt": "雷擊術",
+             "thunderstorm": "雷爆術", "soulstrike": "聖靈召喚", "napalmbeat": "心靈爆破",
+             "sight": "火狩", "frostdiver": "冰凍術", "firewall": "火焰之壁"}
+
+
+def en_skill(text):
+    """「(Napalm Beat) · 範圍」→ 心靈爆破；讀不到回傳 None"""
+    m = re.search(r"[(（]\s*([A-Za-z][A-Za-z0-9 .'-]{2,24})\s*[)）]", text or "")
+    if not m:
+        return None
+    w = re.sub(r"[^a-z]", "", m.group(1).lower().replace("1", "l").replace("0", "o"))
+    if w in EN_SKILLS:
+        return EN_SKILLS[w]
+    import difflib
+    best = difflib.get_close_matches(w, list(EN_SKILLS), n=1, cutoff=0.8)
+    return EN_SKILLS[best[0]] if best else None
+
+
+def canon_skill(text):
+    """卡片標題 → 標準技能名稱。兩個技能一樣像（例如「冰速術」像冰箭術也像冰凍術）就回傳 None，
+    不要亂猜"""
+    t = norm(text)
+    if not t:
+        return None
+    for k in sorted(KNOWN_SKILLS, key=len, reverse=True):
+        if norm(k) in t[: len(norm(k)) + 2]:
+            return k
+    sc = []
+    for k in KNOWN_SKILLS:
+        n = norm(k)
+        h = t[: len(n) + 2]
+        sc.append((_lcs(h, n) / len(n) + (0.15 if h[:1] == n[:1] else 0), k))
+    sc.sort(reverse=True)
+    if sc and sc[0][0] >= 0.6 and (len(sc) == 1 or sc[0][0] > sc[1][0] + 0.01):
+        return sc[0][1]
+    return None
 
 
 def match(text, kw):
@@ -1197,8 +1262,12 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
             if r is not None:
                 rarity = r
         lines = [i for i in g if i["cy"] > title["cy"] and not _is_button(i)]
+        # 新技能卡有英文名稱 → 用它確定是哪個技能（中文標題常被讀錯、或讀成下面的說明）
+        en = next((en_skill(i["text"]) for i in g if en_skill(i["text"])), None)
+        if en and canon_skill(title["text"]) != en:
+            title = dict(title, text=en, n=norm(en))
         out.append({"title": title, "rarity": rarity, "banish": c["banish"], "reroll": c["reroll"],
-                    "lines": lines})
+                    "lines": lines, "en": en})
     return out
 
 
@@ -1214,17 +1283,40 @@ def chest_match(card, name):
     return melee if v == "近戰" else not melee
 
 
-def choose_card(cards, sec):
+def chest_identify(c):
+    """這張寶箱卡是清單上的哪一項（全部寶箱裡）；標題沒讀到時看說明的關鍵字。認不出來回傳 None"""
+    for name, _ in CHEST_ITEMS:
+        if chest_match(c, name):
+            return name
+    txt = norm(" ".join([c["title"]["text"]] + [i["text"] for i in c.get("lines", [])]))
+    for kw, name in CHEST_KEYWORDS:
+        if norm(kw) in txt:
+            return name
+    return None
+
+
+def choose_card(cards, sec, item_slots=None):
+    """寶箱選卡：照優先清單排名。道具欄還沒滿時，新道具會永久佔一格 →
+    排名太後面的新道具（前 new_item_rank 名之外）先不拿，寧可升級已經有的"""
+    slots_free = bool(item_slots) and item_slots[0] < item_slots[1]
+    new_rank = int(sec.get("new_item_rank", sec.get("reroll_rank", 10)) or 0)
     for c in cards:
         s = c["rarity"] if sec.get("prefer_rarity", True) else 0
         c["pri"] = False
         c["rank"] = None          # 在優先清單的第幾名（1 起算）；不在清單 = None
+        c["item"] = chest_identify(c)
         for idx, kw in enumerate(sec.get("priority", [])):
-            if chest_match(c, kw):
+            if chest_match(c, kw) or (c["item"] and c["item"] == kw):
                 s += 1000 - 10 * idx
                 c["pri"] = True
                 c["rank"] = idx + 1
                 break
+        # 標題後面有「+數字」= 已經有的道具（升級）；沒有 = 新道具
+        c["owned"] = bool(re.search(r"\+\s*\d+\s*$", c["title"]["text"]))
+        c["bad_new"] = slots_free and not c["owned"] and new_rank > 0 and \
+            (c["rank"] is None or c["rank"] > new_rank)
+        if c["bad_new"]:
+            s -= 3000
         c["avoid"] = any(match(c["title"]["text"], kw) for kw in sec.get("avoid", []))
         if c["avoid"]:
             s -= 5000
@@ -1737,6 +1829,9 @@ class OcrWatcher(threading.Thread):
                     # 頭目機制：「躲到鐘下！」
                     if any(k in i["n"] for i in items for k in ("钟下", "躲到", "到钟")):
                         upd["bell_t"] = upd["t"]
+                    # 「一大群怪物包圍…」這類事件提示 → 準備跑出包圍
+                    if any("包围" in i["n"] or "一大群" in i["n"] for i in items):
+                        upd["swarm_t"] = upd["t"]
                     # 頭目（MVP）出現：上方有「MVP 名字」和頭目血條
                     for i in items:
                         if "mvp" in i["n"] or (i["n"].startswith("头目") and len(i["n"]) <= 10
@@ -1863,6 +1958,46 @@ END_RING = []          # 最近 20 秒的畫面（JPEG），一局提早結束�
 END_CAP = {"games": 0}
 
 
+def hp_dropping(now, mcfg):
+    """最近 4.5 秒 HP 掉超過最大 HP 的 15%（被一群怪圍著打）→ 接下來 6 秒先跑開"""
+    hh = GAME.get("hp_hist") or []
+    rec = [h for h in hh if now - h[0] <= 4.5]      # HP 每 1.5 秒讀一次
+    if len(rec) < 2:
+        return False
+    # 讀錯的數字（最大 HP 跟其他次差很多）不算
+    mxs = sorted(h[2] for h in rec)
+    mx = mxs[len(mxs) // 2]
+    rec = [h for h in rec if mx and abs(h[2] - mx) <= mx * 0.2 and 0 <= h[1] <= h[2]]
+    if len(rec) < 2:
+        return False
+    top = max(h[1] for h in rec)
+    cur = rec[-1][1]
+    if mx and (top - cur) / mx >= mcfg.get("hp_drop_kite", 0.15):
+        GAME["hp_drop_until"] = now + 6
+        return True
+    return False
+
+
+def crowded(now, dodger, hp, mcfg):
+    """周圍很多東西在動（怪物）持續 2 秒，而且正在掉血 → 被圍住了"""
+    lvl = dodger.crowd_level() if dodger is not None else None
+    if lvl is None:
+        return GAME.get("kite_why") == "被怪物圍住" and now < GAME.get("crowd_until", 0)
+    hi = mcfg.get("crowd_level", 0.55)
+    if GAME.get("kite_why") == "被怪物圍住":
+        if lvl >= hi * 0.8:
+            GAME["crowd_until"] = now + 2
+        return now < GAME.get("crowd_until", 0)
+    if lvl >= hi and hp and hp[1] and hp[0] < hp[1] * 0.85:
+        GAME.setdefault("crowd_since", now)
+        if now - GAME["crowd_since"] >= 2.0:
+            GAME["crowd_until"] = now + 2
+            return True
+    else:
+        GAME.pop("crowd_since", None)
+    return False
+
+
 def ring_push(frame, now):
     if END_RING and now - END_RING[-1][0] < 1.0:
         return
@@ -1939,11 +2074,23 @@ def similar(a, b):
     return match(a, b) or match(b, a)
 
 
-def read_slots(items):
+def read_slots(items, kind="技能"):
+    """「技能 3/4」→ (3, 4)；讀不到或讀起來不合理回傳 None"""
     for i in items:
-        if i["n"].startswith("技能") and SLOT_RE.match(i["n"]):
+        if i["n"].startswith(kind) and SLOT_RE.match(i["n"]):
             dg = i["n"][2:]
-            return int(dg[:-1]), int(dg[-1])
+            used, total = int(dg[:-1]), int(dg[-1])
+            if 1 <= total <= 8 and 0 <= used <= total:
+                return used, total
+    return None
+
+
+def levelup_full(items, slots):
+    """技能欄滿了沒（滿了就只會出現已經有的技能）：True／False／None（看不出來）"""
+    if any("已满" in i["n"] or "只能强化" in i["n"] for i in items):
+        return True
+    if slots:
+        return slots[0] >= slots[1]
     return None
 
 
@@ -2192,9 +2339,33 @@ def find_auto_button(items, frame, ox, oy):
             "cx": cx, "cy": rr["cy"], "estimated": True}
 
 
+def reread_skill(c, st):
+    """標題看不出是哪個技能（例如「冰速術」）→ 把標題那一塊放大再讀一次"""
+    fr = st.get("frame")
+    t = c["title"]
+    if fr is None:
+        return None
+    ox, oy = st.get("ox", 0), st.get("oy", 0)
+    x0 = int(max(0, t["x"] - ox - t["h"] * 2))
+    x1 = int(min(fr.shape[1], t["x"] - ox + t["w"] + t["h"] * 2))
+    y0 = int(max(0, t["y"] - oy - t["h"] * 0.4))
+    y1 = int(min(fr.shape[0], t["y"] - oy + t["h"] * 1.4))
+    if x1 - x0 < 10 or y1 - y0 < 6:
+        return None
+    try:
+        its = ocr(fr[y0:y1, x0:x1], ox + x0, oy + y0, scale=2.5, min_score=0.3)
+    except Exception:
+        return None
+    for i in sorted(its, key=lambda i: -i["w"]):
+        k = canon_skill(i["text"])
+        if k:
+            return k
+    return None
+
+
 def _choose_fourth(c, cards, items, inp, sec, msg):
     """選一張卡當第四技能；先記成「待確認」，下一個升級選單換了卡片才算真的選到"""
-    GAME["fourth"] = c["title"]["text"]
+    GAME["fourth"] = c.get("name") or c["title"]["text"]
     GAME["fourth_ok"] = False
     GAME["fourth_pick"] = {"set": frozenset(norm(x["title"]["text"]) for x in cards),
                            "t": time.time(), "tries": 1}
@@ -2206,23 +2377,91 @@ def _choose_fourth(c, cards, items, inp, sec, msg):
 def handle_levelup(cards, items, sec, inp, st):
     # 偵測新的一局（技能欄數變少）
     slots = read_slots(items)
+    full = levelup_full(items, slots)
     if slots:
         if slots[0] < GAME["slots"]:
             log("技能欄變少了，判斷為新的一局，重設第四技能")
             GAME.update(fourth=None, banish_off=False, banish_fail=0, last_banish=None, levelups=0,
                         attack_banished=False, fourth_banished=False, auto_logged=False,
-                        fourth_ok=False, fourth_pick=None)
+                        fourth_ok=False, fourth_pick=None, banished_names=set(), seen_full=set(),
+                        full_menus=0)
         GAME["slots"] = slots[0]
-    fourth = sec.get("fourth_skill") or GAME["fourth"]
-    if sec.get("fourth_skill"):
-        GAME["fourth_ok"] = True
+    fixed4 = sec.get("fourth_skill")
+    fourth = fixed4 or GAME["fourth"]
 
-    # 第四技能選了但還沒確認：同一組卡片又出現 → 剛剛沒選到，再選一次；換了卡片 → 確認選到了
-    if GAME["fourth"] and not GAME.get("fourth_ok"):
+    # 每張卡是哪個技能：標題看不出來（兩個技能一樣像）就放大再讀一次；還是不行就當「看不清楚」
+    for c in cards:
+        nm = canon_skill(c["title"]["text"])
+        if nm is None and len(norm(c["title"]["text"])) <= 6:
+            nm = reread_skill(c, st)
+            if nm:
+                c["title"] = dict(c["title"], text=nm, n=norm(nm))
+        c["name"] = nm
+        t = nm or c["title"]["text"]
+        if nm:
+            c["pri"] = nm in sec["priority"] or any(match(nm, k) for k in sec["priority"])
+            c["listed"] = any(similar(nm, k) for k in sec.get("banish", []))
+            c["maintype"] = nm in MAIN_TYPE
+        else:
+            # 看不清楚的卡：不放逐、不當第四技能，盡量不選
+            c["pri"] = c["listed"] = c["maintype"] = False
+        c["always"] = c["listed"] and any(similar(t, k) for k in ALWAYS_BANISH)
+        c["is4"] = bool(fourth) and bool(nm) and similar(nm, fourth)
+        c["four"] = (c["is4"] and sec.get("banish_fourth", True)) or c["always"] \
+            or (c["listed"] and sec.get("banish_all_listed", False))
+        c["extra"] = c["listed"] and not c["four"]
+
+    # ---- 第四技能是哪個、選到了沒：看「技能 N/4」最準 ----
+    if fixed4:
+        GAME["fourth_ok"] = True
+    elif full:
+        # 技能欄滿了：第四格一定有東西了；這時出現的非主力技能就是真正的第四技能
+        GAME["full_menus"] = GAME.get("full_menus", 0) + 1
+        GAME.setdefault("seen_full", set()).update(c["name"] for c in cards if c["name"])
+        if not GAME.get("fourth_ok"):
+            GAME["fourth_ok"] = True
+            log("  技能欄滿了（" + (f"{slots[0]}/{slots[1]}" if slots else "已滿")
+                + "）→ 第四技能確定，開始放逐")
+        own = [c for c in cards if c["name"] and not c["maintype"] and not c["always"] and not c["pri"]]
+        own.sort(key=lambda c: 0 if c["listed"] else 1)
+        # 原本記的第四技能有出現 → 沒問題；沒出現、卻出現別的非主力技能 → 那個才是真正的第四技能
+        if own and not any(c["is4"] for c in cards):
+            log(f"  技能欄滿了，實際的第四技能是「{own[0]['name']}」"
+                + (f"（不是「{fourth}」，剛才那個沒選到）" if fourth else ""))
+            GAME["fourth"] = fourth = own[0]["name"]
+            GAME["fourth_banished"] = False
+            for c in cards:
+                c["is4"] = c is own[0] or (c["name"] and similar(c["name"], fourth))
+                c["four"] = (c["is4"] and sec.get("banish_fourth", True)) or c["always"] \
+                    or (c["listed"] and sec.get("banish_all_listed", False))
+                c["extra"] = c["listed"] and not c["four"]
+    elif full is False:
+        # 技能欄還沒滿 → 第四技能還沒選到
+        if GAME.get("fourth_ok"):
+            GAME["fourth_ok"] = False
+        if GAME["fourth"]:
+            fp = GAME.get("fourth_pick") or {}
+            again = next((c for c in cards if c["is4"]), None)
+            if again and fp.get("tries", 1) < 4:
+                fp["tries"] = fp.get("tries", 1) + 1
+                fp["t"] = time.time()
+                GAME["fourth_pick"] = fp
+                log(f"  技能欄還沒滿（{slots[0]}/{slots[1]}），剛才「{GAME['fourth']}」沒選到 → 再選一次")
+                pick_card(again, cards, items, inp, sec.get("number_keys", True))
+                return True
+            log(f"  技能欄還沒滿，「{GAME['fourth']}」沒選到 → 重新挑第四技能")
+            GAME.update(fourth=None, fourth_pick=None)
+            fourth = None
+            for c in cards:
+                c["is4"] = False
+                c["four"] = c["always"] or (c["listed"] and sec.get("banish_all_listed", False))
+                c["extra"] = c["listed"] and not c["four"]
+    elif GAME["fourth"] and not GAME.get("fourth_ok"):
+        # 讀不到技能欄：退回舊方法（同一組卡片又出現 = 沒選到；換了卡片 = 選到了）
         fp = GAME.get("fourth_pick") or {}
         cur = frozenset(norm(x["title"]["text"]) for x in cards)
         if fp and cur == fp.get("set") and time.time() - fp.get("t", 0) < 10:
-            again = next((c for c in cards if similar(c["title"]["text"], GAME["fourth"])), None)
+            again = next((c for c in cards if c["is4"]), None)
             if again and fp.get("tries", 1) < 4:
                 fp["tries"] = fp.get("tries", 1) + 1
                 fp["t"] = time.time()
@@ -2236,25 +2475,12 @@ def handle_levelup(cards, items, sec, inp, st):
             GAME["fourth_ok"] = True
             log(f"  確認第四技能「{GAME['fourth']}」已經選到，之後才開始放逐")
 
-    for c in cards:
-        t = c["title"]["text"]
-        c["pri"] = any(match(t, k) for k in sec["priority"])
-        c["listed"] = any(similar(t, k) for k in sec.get("banish", []))
-        c["always"] = c["listed"] and any(similar(t, k) for k in ALWAYS_BANISH)
-        c["maintype"] = any(similar(t, k) for k in MAIN_TYPE)
-        # 放逐次數很少（通常一局 2 次）→ 只放逐「第四技能」和「攻擊：屬性附加」；
-        # 放逐清單裡的其他技能不放逐，只是不選它（banish_all_listed = true 才會全部放逐）
-        c["four"] = (bool(fourth) and sec.get("banish_fourth", True) and similar(t, fourth)) \
-            or c["always"] or (c["listed"] and sec.get("banish_all_listed", False))
-        # 勾了放逐的其他技能：第四技能和攻擊：屬性附加都放逐完，還有次數（按鈕不是灰色）才放逐
-        c["extra"] = c["listed"] and not c["four"]
-
     lv = read_level(items)
     early_lv = lv if lv is not None else GAME.get("levelups", 0) + 2
 
     # 0. 還沒有第四技能：勾了「放逐」的技能先選一次當第四技能，下次出現才放逐
     #    （第四技能確認選到之前，什麼都不放逐，連攻擊：屬性附加也先不放逐）
-    if not fourth:
+    if not fourth and not full:
         cand = [c for c in cards if c["listed"] and not c["always"] and not c["pri"]
                 and not c["maintype"]]
         if cand:
@@ -2263,9 +2489,10 @@ def handle_levelup(cards, items, sec, inp, st):
                            f"  先選「{c['title']['text']}」當第四技能（確認選到後，下次出現才放逐）")
             return True
 
-    # 1. 第四技能確認選到之後：第四技能或放逐清單裡的技能出現 → 放逐
-    four = [c for c in cards if c["four"] and not c["pri"]]
-    if not four and GAME.get("fourth_ok") and skill_banish_done(sec):
+    # 1. 第四技能確認選到之後：攻擊：屬性附加 → 第四技能 → 其他勾了放逐的（冰箭術這類）依序放逐
+    four = sorted([c for c in cards if c["four"] and not c["pri"]],
+                  key=lambda c: 0 if c["always"] else 1)
+    if not four and GAME.get("fourth_ok") and (core_banish_done(sec) or GAME.get("full_menus", 0) >= 5):
         four = [c for c in cards if c["extra"] and not c["pri"]]
     if four and not GAME.get("fourth_ok"):
         four = []
@@ -2289,24 +2516,23 @@ def handle_levelup(cards, items, sec, inp, st):
             pos = inp.click_item(b, "放逐") or (round(b["cx"]), round(b["cy"]))
             if four[0]["always"]:
                 GAME["attack_banished"] = True
-            elif fourth and similar(four[0]["title"]["text"], fourth):
+            elif four[0].get("is4"):
                 GAME["fourth_banished"] = True
+            GAME.setdefault("banished_names", set()).add(four[0].get("name") or four[0]["title"]["text"])
             log(f"  放逐：{four[0]['title']['text']}（點擊 {pos[0]},{pos[1]}"
                 + ("，位置是推算的" if b.get("estimated") else "") + "）")
             GAME["last_banish"], GAME["last_banish_t"] = key, now
             return True
 
-    # 1.5 攻擊：屬性附加 和 第四技能 都放逐過了 → 改按遊戲的「自動」選技能
-    need_attack = any(k in ALWAYS_BANISH for k in sec.get("banish", []))
-    if sec.get("auto_after_banish", False) and GAME.get("fourth_banished") \
-            and (GAME.get("attack_banished") or not need_attack):
+    # 1.5 該放逐的技能都放逐完了 → 改按遊戲的「自動」選技能
+    if sec.get("auto_after_banish", False) and skill_banish_done(sec):
         btn = find_auto_button(items, st.get("frame"), st.get("ox", 0), st.get("oy", 0))
         if btn and not menu_still_there(st, btn):
             log("  升級選單已經關掉了（遊戲自動選好了）→ 不點，避免點到技能欄")
             return True
         if btn:
             if not GAME.get("auto_logged"):
-                log("  攻擊：屬性附加 和 第四技能 都放逐過了 → 之後改按「自動」選技能")
+                log("  該放逐的技能都放逐完了 → 之後改按「自動」選技能")
                 GAME["auto_logged"] = True
             pos = inp.click_item(btn, "自動") or (round(btn["cx"]), round(btn["cy"]))
             log(f"  按「自動」（點擊 {pos[0]},{pos[1]}" + ("，位置是推算的" if btn.get("estimated")
@@ -2314,8 +2540,8 @@ def handle_levelup(cards, items, sec, inp, st):
             return True
 
     # 2. 前幾次升級：放逐清單裡的技能都沒出現 → 隨便挑一個非主力技能當第四技能
-    if not fourth and early_lv <= sec.get("throwaway_until_level", 3):
-        non = [c for c in cards if not c["pri"] and not c["listed"] and not c["maintype"]]
+    if not fourth and not full and early_lv <= sec.get("throwaway_until_level", 3):
+        non = [c for c in cards if c["name"] and not c["pri"] and not c["listed"] and not c["maintype"]]
         if non:
             c = random.choice(non)
             _choose_fourth(c, cards, items, inp, sec,
@@ -2334,9 +2560,10 @@ def handle_levelup(cards, items, sec, inp, st):
         return True
 
     # 3. 還沒有第四技能 → 隨便選一個當第四
-    if not fourth:
-        pool = [c for c in cards if not c["listed"] and not c["always"] and not c["maintype"]] or \
-            [c for c in cards if c["listed"] and not c["always"] and not c["maintype"]]
+    if not fourth and not full:
+        pool = [c for c in cards if c["name"] and not c["listed"] and not c["always"]
+                and not c["maintype"]] or \
+            [c for c in cards if c["name"] and c["listed"] and not c["always"] and not c["maintype"]]
         if pool:
             c = random.choice(pool)
             _choose_fourth(c, cards, items, inp, sec,
@@ -2359,10 +2586,10 @@ def handle_levelup(cards, items, sec, inp, st):
             return True
     # 沒主力可選：先選已經有的第四技能（不多佔欄位），再來是沒勾放逐的，
     # 再來是攻擊：屬性附加（不佔欄位），最後才是冰箭術這類要額外放逐的
-    fourth_ = GAME.get("fourth")
-    own4 = [c for c in cards if fourth_ and similar(c["title"]["text"], fourth_)]
-    others = own4 or [c for c in cards if not c["listed"]] or \
-        [c for c in cards if c["always"]] or [c for c in cards if not c["maintype"]] or cards
+    own4 = [c for c in cards if c.get("is4")]
+    others = own4 or [c for c in cards if c["name"] and not c["listed"]] or \
+        [c for c in cards if c["always"]] or [c for c in cards if c["name"] and not c["maintype"]] or \
+        [c for c in cards if not c["maintype"]] or cards
     c = random.choice(others)
     GAME["levelups"] = GAME.get("levelups", 0) + 1
     log(f"  沒有主力技能，選：{c['title']['text']}"
@@ -3213,7 +3440,8 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             log(f"第 {GAME['games_done']} 場結束")
             GAME.update(fourth=None, slots=0, banish_off=False, banish_fail=0, last_banish=None,
                         levelups=0, attack_banished=False, fourth_banished=False,
-                        fourth_ok=False, fourth_pick=None,
+                        fourth_ok=False, fourth_pick=None, banished_names=set(), seen_full=set(),
+                        full_menus=0,
                         auto_logged=False, chest_reroll_off=False, chest_reroll_fail=0,
                         chest_banish_off=False, chest_banish_fail=0, chest_banish_wait_logged=False)
         time.sleep(random.uniform(0.8, 1.4))
@@ -3277,7 +3505,7 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             save_action_snapshot(frame, ox, oy, rel)
         return True
 
-    best = choose_card(cards, sec)
+    best = choose_card(cards, sec, read_slots(items, "道具"))
     st["ox"], st["oy"] = ox, oy
     if chest_rank_actions(cards, best, sec, inp, st, cfg.get("levelup", {})):
         st["acted"] = True
@@ -3334,15 +3562,38 @@ def button_really_disabled(st, b, key):
     return now - t0 >= 0.5
 
 
-def skill_banish_done(cfg_lv):
-    """技能那邊該放逐的都放逐完了嗎（第四技能、攻擊：屬性附加）"""
-    if not cfg_lv.get("banish_fourth", True) and not cfg_lv.get("banish"):
-        return True
-    # 放逐次數是技能和寶箱共用的 → 一定要第四技能和攻擊：屬性附加都放逐過，寶箱才可以放逐
+def core_banish_done(cfg_lv):
+    """第四技能、攻擊：屬性附加 都放逐過了（技能欄滿了 8 次還沒出現的，當成不會出現）"""
+    long_ = GAME.get("full_menus", 0) >= 8
+    seen = GAME.get("seen_full", set())
     need_attack = any(k in ALWAYS_BANISH for k in cfg_lv.get("banish", []))
+    attack_ok = GAME.get("attack_banished") or not need_attack or \
+        (long_ and not any(similar(n, k) for n in seen for k in ALWAYS_BANISH))
     need_fourth = cfg_lv.get("banish_fourth", True)
-    return bool((GAME.get("fourth_banished") or not need_fourth)
-                and (GAME.get("attack_banished") or not need_attack))
+    f4 = cfg_lv.get("fourth_skill") or GAME.get("fourth")
+    fourth_ok = GAME.get("fourth_banished") or not need_fourth or \
+        (long_ and GAME.get("fourth_ok") and not (f4 and any(similar(n, f4) for n in seen)))
+    return bool(attack_ok and fourth_ok)
+
+
+def skill_banish_done(cfg_lv):
+    """技能該放逐的都放逐完了：第四技能、攻擊：屬性附加，再加上勾了放逐的主力類型技能（例如冰箭術）。
+    放逐次數是技能和寶箱共用的，所以寶箱要等這個完成才放逐"""
+    if not core_banish_done(cfg_lv):
+        return False
+    done = GAME.get("banished_names", set())
+    seen = GAME.get("seen_full", set())
+    long_ = GAME.get("full_menus", 0) >= 8
+    for k in cfg_lv.get("banish", []):
+        if k not in MAIN_TYPE or any(similar(k, p) for p in cfg_lv.get("priority", [])):
+            continue
+        if any(similar(k, d) for d in done):
+            continue
+        # 技能欄滿了以後一直沒出現 → 這隻角色沒有這個技能，不用等
+        if long_ and not any(similar(k, n) for n in seen):
+            continue
+        return False
+    return True
 
 
 def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
@@ -3351,7 +3602,11 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
         return c.get("rank") or 9999
 
     def label(c):
-        return f"{c['title']['text']}（" + (f"第 {c['rank']} 名" if c.get("rank") else "不在清單") + "）"
+        return f"{c['title']['text']}（" + (f"第 {c['rank']} 名" if c.get("rank") else "不在清單") \
+            + ("、新道具" if c.get("bad_new") else "") + "）"
+
+    def bad_for(c, n):
+        return rk(c) > n or c.get("bad_new")
 
     sig = tuple(norm(c["title"]["text"]) for c in cards)
 
@@ -3381,7 +3636,9 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     # 1. 放逐：排名在前 N 名之外，而且技能那邊已經放逐完
     br = int(sec.get("banish_rank", 0) or 0)
     if br > 0 and not GAME.get("chest_banish_off") and st.get("card_banishes", 0) < 3:
-        bad = [c for c in cards if rk(c) > br and c is not best]
+        # 只放逐「認得出來」的寶箱（標題讀錯、認不出是什麼的不放逐，免得放逐到好東西）
+        bad = [c for c in cards if c is not best and c.get("item") and
+               (rk(c) > br or c.get("item") not in sec.get("priority", []))]
         if bad:
             if not skill_banish_done(lv_sec or {}):
                 if not GAME.get("chest_banish_wait_logged"):
@@ -3407,9 +3664,8 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     rr = int(sec.get("reroll_rank", 0) or 0)
     if rr > 0 and not GAME.get("chest_reroll_off") \
             and st.get("card_rerolls", 0) < int(sec.get("reroll_limit", 6) or 0):
-        bad = [c for c in cards if rk(c) > rr and c is not best]
-        if rk(best) > rr:
-            bad.append(best)        # 連最好的都在前 N 名之外 → 也重抽
+        # 要拿的那張已經在前 N 名內（而且不是會佔欄位的爛新道具）→ 直接拿，不浪費重抽
+        bad = [c for c in cards if bad_for(c, rr)] if bad_for(best, rr) else []
         dis_r = button_really_disabled(st, max(bad, key=rk)["reroll"], "chest_r") if bad else False
         if dis_r is None:
             time.sleep(0.6)
@@ -4051,7 +4307,7 @@ def run(cfg):
                     GAME["max_timer"] = max(GAME.get("max_timer", 0), tmr)
                 ending = tmr is not None and GAME.get("max_timer", 0) >= 300 \
                     and tmr <= lvc.get("stop_before_end_sec", 25) \
-                    and now - max(res.get("mvp_t", 0), GAME.get("bar_t", 0)) > 4  # 頭目還在（頭目戰的 2 分鐘倒數）不算
+                    and now - GAME.get("bar_t", 0) > 4  # 頭目還在（頭目戰的 2 分鐘倒數）不算
                 if ending and not GAME.get("ending_logged"):
                     log("Boss 已打完、進入最後倒數，不再升級")
                     GAME["ending_logged"] = True
@@ -4103,7 +4359,9 @@ def run(cfg):
                     bumps = 0
                     battle_t0 = now
                     GAME.update(bell_ep=None, bells_done=[], bell_count=0, mvp_logged=False, last_hp=None,
-                                kite_why=None, boss_hp0=None, boss_seen=[])
+                                kite_why=None, boss_hp0=None, boss_seen=[], hp_hist=[], hp_drop_until=0,
+                                crowd_until=0)
+                    GAME.pop("crowd_since", None)
                     if dodger:
                         dodger.stats['dodge'] = 0
                     with watcher.lock:              # 上一場的地圖名稱不要帶到這一場
@@ -4219,9 +4477,15 @@ def run(cfg):
                             GAME["bar_t"] = now
                     except Exception:
                         pass
-                mvp_on = now - max(res.get("mvp_t", 0), GAME.get("bar_t", 0)) < 6.0
+                # 頭目在不在：只看畫面上方的頭目血條（文字辨識的「頭目」「MVP」常常誤讀，只拿來讀名字）
+                mvp_on = now - GAME.get("bar_t", 0) < 6.0
                 if res.get("hp") is not None and now - res.get("hp_t", 0) < 5:
-                    GAME["last_hp"] = (res["hp"], res["hp_max"])
+                    hp_now = (res["hp"], res["hp_max"])
+                    if hp_now != GAME.get("last_hp"):
+                        hh_ = GAME.setdefault("hp_hist", [])
+                        hh_.append((now, hp_now[0], hp_now[1]))
+                        del hh_[:-30]
+                    GAME["last_hp"] = hp_now
                 if mvp_on and not GAME.get("mvp_logged"):
                     GAME["mvp_logged"] = True
                     nm_ = res.get("mvp_name") or ""
@@ -4285,6 +4549,11 @@ def run(cfg):
                     continue
                 # 頭目（MVP）在場：地上的紅色預警範圍 → 站在裡面就往最近的安全處走
                 dodge_on = dodger is not None and not dry and (mvp_on or bool(GAME.get("kite_why")))
+                if not dodge_on and dodger is not None and not dry and mcfg.get("crowd_kite", True) \
+                        and now >= GAME.get("crowd_next", 0):
+                    # 平常也看一下周圍怪物多不多（每 0.15 秒一次）
+                    GAME["crowd_next"] = now + 0.15
+                    dodger.update(frame, now, bst["world"], lc)
                 if dodge_on:
                     dodger.update(frame, now, bst["world"], lc)
                     wall_ok = None
@@ -4314,22 +4583,35 @@ def run(cfg):
                     mt_ = GAME.get("max_timer", 0)
                     prep_ = mcfg.get("boss_prep_sec", 8)
                     hp_ = GAME.get("last_hp")
-                    if mvp_on:
-                        kite_why = "頭目在場"
-                    elif any(t_ - prep_ <= mt_ < t_ + 35 and not any(t_ - prep_ <= b_ < t_ + 60 for b_ in
-                                                                    GAME.get("boss_seen", []))
-                             for t_ in mcfg.get("boss_times", [])):
+                    hp_low_ = bool(hp_ and hp_[1] and hp_[0] < hp_[1] * mcfg.get("boss_kite_hp", 0.85))
+                    if mvp_on and mt_ >= mcfg.get("boss_capture_from", 830):
+                        kite_why = "MVP 在場"
+                    elif mvp_on and (hp_low_ or GAME.get("kite_why") == "頭目在場、在掉血"):
+                        # 一般頭目：滿血時照常撿東西（只躲紅色預警）；開始掉血才不撿、繞圈躲
+                        kite_why = "頭目在場、在掉血"
+                    elif not mvp_on and any(t_ - prep_ <= mt_ < t_ + 5 and
+                                            not any(t_ - prep_ <= b_ < t_ + 60 for b_ in GAME.get("boss_seen", []))
+                                            for t_ in mcfg.get("boss_times", [])):
                         kite_why = "頭目快出現了"
+                    elif mcfg.get("crowd_kite", True) and now - res.get("swarm_t", 0) < 20:
+                        kite_why = "一大群怪物包圍"
+                    elif mcfg.get("crowd_kite", True) and hp_dropping(now, mcfg) or \
+                            (GAME.get("kite_why") == "HP 掉很快" and now < GAME.get("hp_drop_until", 0)):
+                        kite_why = "HP 掉很快"
+                    elif mcfg.get("crowd_kite", True) and crowded(now, dodger, hp_, mcfg):
+                        kite_why = "被怪物圍住"
                     elif hp_ and hp_[1] and mcfg.get("low_hp_kite", 0.4) and \
                             (hp_[0] / hp_[1] < mcfg.get("low_hp_kite", 0.4) or
                              (GAME.get("kite_why") == "HP 太低" and hp_[0] / hp_[1] < 0.7)):
                         kite_why = "HP 太低"
                 if kite_why != GAME.get("kite_why"):
                     if kite_why:
-                        log(f"{kite_why} → 不追遠處的東西，在空曠的地方繞圈移動"
-                            + ("、躲紅色預警" if dodge_on else ""))
+                        hp_ = GAME.get("last_hp")
+                        log(f"{kite_why} → 不追遠處的東西，往怪少、空曠的地方繞圈移動"
+                            + ("、躲紅色預警" if dodge_on else "")
+                            + (f"（HP {hp_[0]}/{hp_[1]}）" if hp_ else ""))
                     elif GAME.get("kite_why"):
-                        log("頭目戰走位結束 → 回到平常撿東西")
+                        log("躲避走位結束 → 回到平常撿東西")
                         dodger.reset_kite()
                     GAME["kite_why"] = kite_why
                 if kite_why:

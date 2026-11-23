@@ -10,6 +10,9 @@ import numpy as np
 DS = 4                 # 縮小倍數（1264x921 → 316x230，夠快）
 CHAR_R = 34            # 角色腳下要保持安全的半徑（原始像素）
 MIN_BLOB = 1000        # 小於這個面積（原始像素）的紅色塊當成雜訊（技能特效、數字）
+# 「新變紅」的塊要夠大或夠長才算預警：自己的火狩（繞著角色轉的火焰）、打中怪的特效都是小塊
+NEW_MIN_AREA = 3500
+NEW_MIN_LEN = 150
 DIRS = 24
 LANTERN_R = 16         # 燈籠周圍（縮小後格數）不算
 
@@ -30,9 +33,10 @@ def danger_mask(frame, extra=None):
     if lan.any():
         lan = cv2.dilate(lan, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * LANTERN_R + 1,) * 2))
         m2 &= lan == 0
-    # 色相 0~8 的「靜態」判斷會把紅地板、燈籠光也算進去 → 只有沒有鏡頭資料時才用；
-    # 有鏡頭資料時改用 extra（跟幾秒前同一塊地面比，新變紅的地方）
-    m = (m1 | (m2 if extra is None else extra.astype(bool))).astype(np.uint8)
+    # 只看顏色會把紅地板、紫色地面、燈籠光也算進去 → 只有沒有鏡頭資料時才用；
+    # 有鏡頭資料時只用 extra（跟幾秒前同一塊地面比，新變紅／新變粉紅的地方）
+    temporal = extra is not None
+    m = (extra.astype(bool) if temporal else (m1 | m2)).astype(np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     H, W = m.shape
@@ -43,7 +47,12 @@ def danger_mask(frame, extra=None):
     m[int(H * 0.82):, int(W * 0.33):int(W * 0.67)] = 0  # 技能欄
     n, lab, st, _ = cv2.connectedComponentsWithStats(m, 8)
     keep = np.zeros(n, np.uint8)
-    keep[1:] = st[1:, cv2.CC_STAT_AREA] * DS * DS >= MIN_BLOB
+    if temporal:
+        area = st[1:, cv2.CC_STAT_AREA] * DS * DS
+        long_ = np.maximum(st[1:, cv2.CC_STAT_WIDTH], st[1:, cv2.CC_STAT_HEIGHT]) * DS
+        keep[1:] = (area >= NEW_MIN_AREA) | ((long_ >= NEW_MIN_LEN) & (area >= MIN_BLOB))
+    else:
+        keep[1:] = st[1:, cv2.CC_STAT_AREA] * DS * DS >= MIN_BLOB
     return keep[lab]
 
 
@@ -116,11 +125,13 @@ class BossDodge:
         燈籠、紅地板一直都是紅的，不會算進去。world = 角色在地圖上的位置（像素，鏡頭位移累計）"""
         red, hsv = _redness(frame)
         core = lantern_core(hsv)
+        gray = hsv[:, :, 2]
         H, W = red.shape
         base = None
         pcore = None
         if world is not None:
-            for t, r0, w0, c0 in self.hist:
+            self._crowd(gray, now, world, lc)
+            for t, r0, w0, c0, _g in self.hist:
                 if not (0.35 <= now - t <= HIST_SEC):
                     continue
                 # 同一塊地面：現在畫面 p ↔ 過去畫面 p + (world_now - world_then)
@@ -137,7 +148,7 @@ class BossDodge:
                 ac[ys0:ys1, xs0:xs1] = c0[ys0 + sy:ys1 + sy, xs0 + sx:xs1 + sx]
                 pcore = ac if pcore is None else np.maximum(pcore, ac)
             if not self.hist or now - self.hist[-1][0] >= 0.15:
-                self.hist.append((now, red, world, core))
+                self.hist.append((now, red, world, core, gray))
             self.hist = [h for h in self.hist if now - h[0] <= HIST_SEC + 0.5]
         if base is None:
             return np.zeros_like(red, dtype=np.uint8)
@@ -154,6 +165,64 @@ class BossDodge:
         cen = (lc[0] / DS, lc[1] / DS) if lc is not None else (W / 2, H / 2)
         m &= lantern_mask(hsv, pcore, cen) == 0     # 燈籠的光會忽明忽暗，不算
         return m.astype(np.uint8)
+
+    def _crowd(self, gray, now, world, lc):
+        """怪物多不多：跟 0.25~0.8 秒前同一塊地面比，有東西在動的地方（怪物走動、打中怪的特效）。
+        地圖本身不會動，所以剩下來的大多是怪物。存在 self.dyn（縮小後 0/1）"""
+        self.dyn = None
+        ref = None
+        for h in reversed(self.hist):
+            if 0.25 <= now - h[0] <= 0.8:
+                ref = h
+                break
+        if ref is None:
+            return
+        H, W = gray.shape
+        sx = int(round((world[0] - ref[2][0]) / DS))
+        sy = int(round((world[1] - ref[2][1]) / DS))
+        if abs(sx) >= W // 3 or abs(sy) >= H // 3:
+            return
+        g0 = ref[4]
+        al = np.zeros_like(g0)
+        ok = np.zeros(g0.shape, np.uint8)
+        ys0, ys1 = max(0, -sy), min(H, H - sy)
+        xs0, xs1 = max(0, -sx), min(W, W - sx)
+        al[ys0:ys1, xs0:xs1] = g0[ys0 + sy:ys1 + sy, xs0 + sx:xs1 + sx]
+        ok[ys0:ys1, xs0:xs1] = 1
+        d = cv2.absdiff(cv2.GaussianBlur(gray, (3, 3), 0), cv2.GaussianBlur(al, (3, 3), 0))
+        m = ((d > 28) & (ok > 0)).astype(np.uint8)
+        m[:int(H * 0.13), :int(W * 0.36)] = 0
+        m[:int(H * 0.24), int(W * 0.25):int(W * 0.76)] = 0
+        m[:int(H * 0.31), int(W * 0.80):] = 0
+        m[int(H * 0.82):, int(W * 0.30):int(W * 0.70)] = 0
+        cx, cy = (lc[0] / DS, lc[1] / DS) if lc is not None else (W / 2, H / 2)
+        cv2.circle(m, (int(cx), int(cy)), int(45 / DS), 0, -1)     # 角色自己
+        self.dyn = m
+        self.dyn_c = (cx, cy)
+
+    def crowd_dir(self, v, r0=60, r1=300):
+        """方向 v 那一側（±30 度、60~300 像素）有多少東西在動：0~1"""
+        m = getattr(self, "dyn", None)
+        if m is None:
+            return 0.0
+        H, W = m.shape
+        cx, cy = self.dyn_c
+        tot = hit = 0
+        for rr in range(int(r0 / DS), int(r1 / DS), 3):
+            for da in (-0.5, -0.25, 0.0, 0.25, 0.5):
+                a = math.atan2(v[1], v[0]) + da
+                x, y = int(cx + math.cos(a) * rr), int(cy + math.sin(a) * rr)
+                if 0 <= x < W and 0 <= y < H:
+                    tot += 1
+                    hit += int(m[y, x])
+        return hit / tot if tot else 0.0
+
+    def crowd_level(self):
+        m = getattr(self, "dyn", None)
+        if m is None:
+            return None
+        return float(np.mean([self.crowd_dir((math.cos(a), math.sin(a)))
+                              for a in np.linspace(0, 2 * math.pi, 8, endpoint=False)]))
 
     def update(self, frame, now, world=None, lc=None):
         m = danger_mask(frame, extra=self._new_red(frame, now, world, lc))
@@ -244,7 +313,7 @@ class BossDodge:
             math.hypot(world[0] - st["pos"][0][1][0], world[1] - st["pos"][0][1][1]) < 12
         kd = st["dir"]
         need = kd is None or now >= st["next"] or stuck or self._ahead_bad(kd, lc, now) > 0.15 \
-            or (free is not None and free(kd) < 0.45)
+            or (free is not None and free(kd) < 0.45) or self.crowd_dir(kd) > 0.35
         if not need:
             return kd
         best = None
@@ -256,6 +325,7 @@ class BossDodge:
             if free is not None:
                 sc += 2.0 * free(v)
             sc -= 3.0 * self._ahead_bad(v, lc, now)
+            sc -= 2.5 * self.crowd_dir(v)          # 怪物多的那一側不要去
             if base is not None:
                 dot = v[0] * base[0] + v[1] * base[1]
                 # 繞圈：偏好轉 60~120 度的方向；卡住了就偏好往回走
