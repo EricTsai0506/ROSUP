@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.6"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.7"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -1865,7 +1865,8 @@ def save_image(img, name):
 #  選單處理
 # =====================================================================
 MOVER = None
-GAME = {"phase": None, "battle_seen": 0, "fourth": None, "slots": 0, "banish_off": False,
+GAME = {"phase": None, "battle_seen": 0, "fourth": None, "fourth_ok": False, "fourth_pick": None,
+        "slots": 0, "banish_off": False,
         "last_banish": None, "last_banish_t": 0, "banish_fail": 0}
 
 
@@ -2134,6 +2135,17 @@ def find_auto_button(items, frame, ox, oy):
             "cx": cx, "cy": rr["cy"], "estimated": True}
 
 
+def _choose_fourth(c, cards, items, inp, sec, msg):
+    """選一張卡當第四技能；先記成「待確認」，下一個升級選單換了卡片才算真的選到"""
+    GAME["fourth"] = c["title"]["text"]
+    GAME["fourth_ok"] = False
+    GAME["fourth_pick"] = {"set": frozenset(norm(x["title"]["text"]) for x in cards),
+                           "t": time.time(), "tries": 1}
+    GAME["levelups"] = GAME.get("levelups", 0) + 1
+    log(msg)
+    pick_card(c, cards, items, inp, sec.get("number_keys", True))
+
+
 def handle_levelup(cards, items, sec, inp, st):
     # 偵測新的一局（技能欄數變少）
     slots = read_slots(items)
@@ -2141,9 +2153,31 @@ def handle_levelup(cards, items, sec, inp, st):
         if slots[0] < GAME["slots"]:
             log("技能欄變少了，判斷為新的一局，重設第四技能")
             GAME.update(fourth=None, banish_off=False, banish_fail=0, last_banish=None, levelups=0,
-                        attack_banished=False, fourth_banished=False, auto_logged=False)
+                        attack_banished=False, fourth_banished=False, auto_logged=False,
+                        fourth_ok=False, fourth_pick=None)
         GAME["slots"] = slots[0]
     fourth = sec.get("fourth_skill") or GAME["fourth"]
+    if sec.get("fourth_skill"):
+        GAME["fourth_ok"] = True
+
+    # 第四技能選了但還沒確認：同一組卡片又出現 → 剛剛沒選到，再選一次；換了卡片 → 確認選到了
+    if GAME["fourth"] and not GAME.get("fourth_ok"):
+        fp = GAME.get("fourth_pick") or {}
+        cur = frozenset(norm(x["title"]["text"]) for x in cards)
+        if fp and cur == fp.get("set") and time.time() - fp.get("t", 0) < 10:
+            again = next((c for c in cards if similar(c["title"]["text"], GAME["fourth"])), None)
+            if again and fp.get("tries", 1) < 4:
+                fp["tries"] = fp.get("tries", 1) + 1
+                fp["t"] = time.time()
+                log(f"  剛才「{GAME['fourth']}」好像沒選到（同一組卡片還在）→ 再選一次")
+                pick_card(again, cards, items, inp, sec.get("number_keys", True))
+                return True
+            log(f"  「{GAME['fourth']}」一直選不到 → 重新挑第四技能")
+            GAME.update(fourth=None, fourth_pick=None)
+            fourth = None
+        else:
+            GAME["fourth_ok"] = True
+            log(f"  確認第四技能「{GAME['fourth']}」已經選到，之後才開始放逐")
 
     for c in cards:
         t = c["title"]["text"]
@@ -2155,22 +2189,21 @@ def handle_levelup(cards, items, sec, inp, st):
 
     lv = read_level(items)
     early_lv = lv if lv is not None else GAME.get("levelups", 0) + 2
-    slots_free = slots is not None and slots[0] < slots[1]
 
     # 0. 還沒有第四技能：勾了「放逐」的技能先選一次當第四技能，下次出現才放逐
-    #    （攻擊：屬性附加 不佔技能欄位，出現就直接放逐）
-    if not fourth and (early_lv <= sec.get("throwaway_until_level", 3) or slots_free):
+    #    （第四技能確認選到之前，什麼都不放逐，連攻擊：屬性附加也先不放逐）
+    if not fourth:
         cand = [c for c in cards if c["listed"] and not c["always"] and not c["pri"]]
         if cand:
             c = random.choice(cand)
-            GAME["fourth"] = c["title"]["text"]
-            GAME["levelups"] = GAME.get("levelups", 0) + 1
-            log(f"  先選「{c['title']['text']}」當第四技能（下次出現才放逐）")
-            pick_card(c, cards, items, inp, sec.get("number_keys", True))
+            _choose_fourth(c, cards, items, inp, sec,
+                           f"  先選「{c['title']['text']}」當第四技能（確認選到後，下次出現才放逐）")
             return True
 
-    # 1. 第四技能或放逐清單裡的技能出現 → 放逐
+    # 1. 第四技能確認選到之後：第四技能或放逐清單裡的技能出現 → 放逐
     four = [c for c in cards if c["four"] and not c["pri"]]
+    if four and not GAME.get("fourth_ok"):
+        four = []
     if four and not GAME["banish_off"]:
         key = norm(four[0]["title"]["text"])
         now = time.time()
@@ -2213,10 +2246,8 @@ def handle_levelup(cards, items, sec, inp, st):
         non = [c for c in cards if not c["pri"] and not c["listed"]]
         if non:
             c = random.choice(non)
-            GAME["fourth"] = c["title"]["text"]
-            GAME["levelups"] = GAME.get("levelups", 0) + 1
-            log(f"  Lv {early_lv}：先選「{c['title']['text']}」當第四技能（之後出現會放逐）")
-            pick_card(c, cards, items, inp, sec.get("number_keys", True))
+            _choose_fourth(c, cards, items, inp, sec,
+                           f"  Lv {early_lv}：先選「{c['title']['text']}」當第四技能（之後出現會放逐）")
             return True
 
     # 3. 主力技能
@@ -2232,11 +2263,10 @@ def handle_levelup(cards, items, sec, inp, st):
 
     # 3. 還沒有第四技能 → 隨便選一個當第四
     if not fourth:
-        c = random.choice([c for c in cards if not c["listed"]] or cards)
-        GAME["fourth"] = c["title"]["text"]
-        GAME["levelups"] = GAME.get("levelups", 0) + 1
-        log(f"  沒有主力技能，選「{c['title']['text']}」當第四技能（之後出現會放逐）")
-        pick_card(c, cards, items, inp, sec.get("number_keys", True))
+        c = random.choice([c for c in cards if not c["listed"] and not c["always"]] or
+                          [c for c in cards if not c["always"]] or cards)
+        _choose_fourth(c, cards, items, inp, sec,
+                       f"  沒有主力技能，選「{c['title']['text']}」當第四技能（之後出現會放逐）")
         return True
 
     # 4. 已有第四技能、又沒主力 → 重抽，不然隨便選一個非第四的
@@ -3012,6 +3042,7 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             log(f"第 {GAME['games_done']} 場結束")
             GAME.update(fourth=None, slots=0, banish_off=False, banish_fail=0, last_banish=None,
                         levelups=0, attack_banished=False, fourth_banished=False,
+                        fourth_ok=False, fourth_pick=None,
                         auto_logged=False)
         time.sleep(random.uniform(0.8, 1.4))
         return True
