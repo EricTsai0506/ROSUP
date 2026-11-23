@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.14"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.15"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -528,6 +528,8 @@ def _lcs(a, b):
 
 # 不佔技能欄位、出現就直接放逐（不會被選來當第四技能）
 ALWAYS_BANISH = ["攻擊：屬性附加"]
+# 主力類型的技能：勾了放逐只算「額外放逐」，不會被選來當第四技能
+MAIN_TYPE = ["火箭術", "冰箭術", "雷擊術"]
 
 # 已知技能名稱：用來避免把「雷爆術」誤認成「雷擊術」這類相近名字
 KNOWN_SKILLS = ["火箭術", "冰箭術", "雷擊術", "雷爆術", "聖靈召喚", "心靈爆破", "火狩",
@@ -2236,6 +2238,7 @@ def handle_levelup(cards, items, sec, inp, st):
         c["pri"] = any(match(t, k) for k in sec["priority"])
         c["listed"] = any(similar(t, k) for k in sec.get("banish", []))
         c["always"] = c["listed"] and any(similar(t, k) for k in ALWAYS_BANISH)
+        c["maintype"] = any(similar(t, k) for k in MAIN_TYPE)
         # 放逐次數很少（通常一局 2 次）→ 只放逐「第四技能」和「攻擊：屬性附加」；
         # 放逐清單裡的其他技能不放逐，只是不選它（banish_all_listed = true 才會全部放逐）
         c["four"] = (bool(fourth) and sec.get("banish_fourth", True) and similar(t, fourth)) \
@@ -2249,7 +2252,8 @@ def handle_levelup(cards, items, sec, inp, st):
     # 0. 還沒有第四技能：勾了「放逐」的技能先選一次當第四技能，下次出現才放逐
     #    （第四技能確認選到之前，什麼都不放逐，連攻擊：屬性附加也先不放逐）
     if not fourth:
-        cand = [c for c in cards if c["listed"] and not c["always"] and not c["pri"]]
+        cand = [c for c in cards if c["listed"] and not c["always"] and not c["pri"]
+                and not c["maintype"]]
         if cand:
             c = random.choice(cand)
             _choose_fourth(c, cards, items, inp, sec,
@@ -2304,7 +2308,7 @@ def handle_levelup(cards, items, sec, inp, st):
 
     # 2. 前幾次升級：放逐清單裡的技能都沒出現 → 隨便挑一個非主力技能當第四技能
     if not fourth and early_lv <= sec.get("throwaway_until_level", 3):
-        non = [c for c in cards if not c["pri"] and not c["listed"]]
+        non = [c for c in cards if not c["pri"] and not c["listed"] and not c["maintype"]]
         if non:
             c = random.choice(non)
             _choose_fourth(c, cards, items, inp, sec,
@@ -2324,10 +2328,18 @@ def handle_levelup(cards, items, sec, inp, st):
 
     # 3. 還沒有第四技能 → 隨便選一個當第四
     if not fourth:
-        c = random.choice([c for c in cards if not c["listed"] and not c["always"]] or
-                          [c for c in cards if not c["always"]] or cards)
-        _choose_fourth(c, cards, items, inp, sec,
-                       f"  沒有主力技能，選「{c['title']['text']}」當第四技能（之後出現會放逐）")
+        pool = [c for c in cards if not c["listed"] and not c["always"] and not c["maintype"]] or \
+            [c for c in cards if c["listed"] and not c["always"] and not c["maintype"]]
+        if pool:
+            c = random.choice(pool)
+            _choose_fourth(c, cards, items, inp, sec,
+                           f"  沒有主力技能，選「{c['title']['text']}」當第四技能（之後出現會放逐）")
+            return True
+        # 只剩冰箭術這類額外放逐的技能：先選一個，但不當第四技能
+        c = random.choice([c for c in cards if not c["always"]] or cards)
+        GAME["levelups"] = GAME.get("levelups", 0) + 1
+        log(f"  只能選「{c['title']['text']}」（不當第四技能）")
+        pick_card(c, cards, items, inp, sec.get("number_keys", True))
         return True
 
     # 4. 已有第四技能、又沒主力 → 重抽，不然隨便選一個非第四的
