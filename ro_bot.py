@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.4.12"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.13"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -3210,9 +3210,11 @@ def skill_banish_done(cfg_lv):
     """技能那邊該放逐的都放逐完了嗎（第四技能、攻擊：屬性附加）"""
     if not cfg_lv.get("banish_fourth", True) and not cfg_lv.get("banish"):
         return True
+    # 放逐次數是技能和寶箱共用的 → 一定要第四技能和攻擊：屬性附加都放逐過，寶箱才可以放逐
     need_attack = any(k in ALWAYS_BANISH for k in cfg_lv.get("banish", []))
-    return bool(GAME.get("banish_off") or (GAME.get("fourth_banished")
-                                           and (GAME.get("attack_banished") or not need_attack)))
+    need_fourth = cfg_lv.get("banish_fourth", True)
+    return bool((GAME.get("fourth_banished") or not need_fourth)
+                and (GAME.get("attack_banished") or not need_attack))
 
 
 def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
