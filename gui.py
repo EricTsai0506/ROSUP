@@ -107,6 +107,7 @@ class App:
             pass
         c["levelup"]["rarity_first"] = self.v_rarity.get()
         c["levelup"]["auto_after_banish"] = self.v_autopick.get()
+        c["chest"]["auto"] = self.v_chest_auto.get()
         try:
             lo, hi = int(self.v_bmin.get()), int(self.v_bmax.get())
             c["levelup"]["batch_min"], c["levelup"]["batch_max"] = min(lo, hi), max(lo, hi)
@@ -312,7 +313,7 @@ class App:
                             command=lambda n=name: self.v_main[n].get() and self.v_main[n].set(False)
                             if self.v_ban[n].get() else None).grid(row=row + 1, column=base + 2)
         self.v_autopick = tk.BooleanVar()
-        ttk.Checkbutton(f2, text="放逐完「攻擊：屬性附加」和第四技能之後，改按遊戲的「自動」選技能",
+        ttk.Checkbutton(f2, text="技能自動：放逐完「攻擊：屬性附加」和第四技能之後，改按遊戲的「自動」",
                         variable=self.v_autopick).grid(row=1, column=0, columnspan=2, sticky="w",
                                                        pady=(4, 0))
         uf = ttk.Frame(f2)
@@ -365,6 +366,9 @@ class App:
                         ("▼ 下移", lambda: self.move_chest(1)),
                         ("⤓ 置底", lambda: self.move_chest("bottom"))):
             ttk.Button(bf2, text=txt, width=8, command=fn).pack(pady=2)
+        self.v_chest_auto = tk.BooleanVar()
+        ttk.Checkbutton(f4, text="寶箱自動：直接按遊戲的「自動寶箱」（不勾 = 照上面的優先順序選）",
+                        variable=self.v_chest_auto).grid(row=3, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(f4, text="清單以外的寶箱，選卡片等級高的（普通<優良<稀有<史詩<傳說）",
                         variable=self.v_chest_rarity).grid(row=2, column=0, columnspan=2,
                                                            sticky="w")
@@ -375,8 +379,6 @@ class App:
             for w in f1.grid_slaves():
                 if w not in keep:
                     w.grid_remove()
-            nb.forget(f2)   # 從分頁移除（隱藏的分頁仍會撐大視窗）；設定照常生效
-            nb.forget(f4)
 
         # 休息排程
         f3 = ttk.Frame(nb, padding=8)
@@ -468,7 +470,8 @@ class App:
                               any(rb.match(n, k) and rb.match(k, n) for k in ban))
         self.v_until.set(str(c["levelup"].get("target_until_level", 11)))
         self.v_rarity.set(c["levelup"].get("rarity_first", False))
-        self.v_autopick.set(c["levelup"].get("auto_after_banish", True))
+        self.v_autopick.set(c["levelup"].get("auto_after_banish", False))
+        self.v_chest_auto.set(c["chest"].get("auto", False))
         sch = c.get("schedule", {})
         self.v_sch.set(sch.get("enabled", False))
         self.v_gmin.set(str(sch.get("games_min", 3)))

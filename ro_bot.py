@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.3.5"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.4.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -221,7 +221,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 13,
+    "config_version": 14,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -236,7 +236,7 @@ DEFAULT_CONFIG = {
         "fourth_skill": "",
         "banish_fourth": True,
         "banish": ["聖靈召喚", "心靈爆破", "火焰之壁", "冰凍術", "火狩", "雷爆術", "攻擊：屬性附加"],
-        "auto_after_banish": True,
+        "auto_after_banish": False,  # 放逐完後改按遊戲的「自動」選技能（預設不按）
         "throwaway_until_level": 3,
         "target_until_level": 11,
         "target_words": ["目標"],
@@ -308,6 +308,7 @@ DEFAULT_CONFIG = {
         "banish_avoid": False,
         "max_reroll": 0,
         "prefer_rarity": True,
+        "auto": False,               # true = 寶箱直接按遊戲的「自動寶箱」（預設不按，照優先順序選）
         "think_sec": [0.2, 0.5],
     },
     "move": {
@@ -405,7 +406,10 @@ def migrate_config(cfg, ver=None):
                                      [0.69, 0.00, 1.00, 0.23], [0.38, 0.85, 0.62, 1.00]]:
             cfg["hud_ignore"] = [[0.00, 0.00, 0.36, 0.17], [0.37, 0.00, 0.63, 0.15],
                                  [0.80, 0.00, 1.00, 0.31], [0.34, 0.82, 0.66, 1.00]]
-    cfg["config_version"] = 13
+    if ver < 14:  # 技能、寶箱預設都不按遊戲的「自動」
+        cfg["levelup"]["auto_after_banish"] = False
+        cfg["chest"]["auto"] = False
+    cfg["config_version"] = 14
     return cfg
 
 
@@ -2104,7 +2108,7 @@ def handle_levelup(cards, items, sec, inp, st):
 
     # 1.5 攻擊：屬性附加 和 第四技能 都放逐過了 → 改按遊戲的「自動」選技能
     need_attack = any(k in ALWAYS_BANISH for k in sec.get("banish", []))
-    if sec.get("auto_after_banish", True) and GAME.get("fourth_banished") \
+    if sec.get("auto_after_banish", False) and GAME.get("fourth_banished") \
             and (GAME.get("attack_banished") or not need_attack):
         btn = find_auto_button(items, st.get("frame"), st.get("ox", 0), st.get("oy", 0))
         if btn and not menu_still_there(st, btn):
@@ -2445,6 +2449,31 @@ def town_ocr(frame, rect, cfg, inp, tst):
         tst["cooldown_until"] = time.time() + 3
         tst["target"] = None
 
+    # 遊戲更新後：打完一場回到城鎮時已經離開大廳（上方顯示「離線」）
+    # → 點上方的地點標示，再按「單人大廳」重新進入
+    now_ = time.time()
+    if now_ - tst.get("rejoin_t", 0) < 8:
+        solo = next((i for i in items if match(i["text"], cfg["lobby"]["button"])), None)
+        if solo:
+            click(solo, cfg["lobby"]["button"])
+            tst["rejoin_t"] = 0
+            return "acted"
+    left = any(norm(k) in joined for k in ("離開大廳", "再次進入"))
+    mark = next((i for i in items if i["cy"] - oy < H * 0.15 and abs(i["cx"] - ox - W / 2) < W * 0.25
+                 and norm("離線") in i["n"]), None)
+    if mark is None and left:
+        mark = next((i for i in items if i["cy"] - oy < H * 0.15 and norm("普隆德拉") in i["n"]), None)
+    if mark is not None and now_ - tst.get("rejoin_t", 0) > 8:
+        log("已經離開大廳（上方顯示離線）→ 點上方的標示重新進入")
+        click(mark, "上方地點標示")
+        tst["rejoin_t"] = time.time()
+        tst["cooldown_until"] = time.time() + 1.2
+        if cfg["debug_snapshots"]:
+            tst["rejoin_snap"] = True
+        return "acted"
+    if tst.pop("rejoin_snap", False):
+        save_image(frame, "rejoin")          # 點完標示之後的畫面（除錯用）
+
     dm = detect_menu(items)
     if dm == "expedition":
         handle_expedition(frame, items, rect, cfg, inp)
@@ -2589,7 +2618,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
             if not tst.get("route_checked"):
                 tst["npc_first"] = (npc_w, off)
                 tst["route_checked"] = True
-                if math.hypot(*off) < 120:
+                if math.hypot(*off) < 250:      # 名字標籤固定偏一點（例如遊戲更新後）也算同一個出生點
                     tst["route_on"], tst["route_i"] = True, 0
                     log("出生點跟上次一樣 → 照記住的路線走")
                 else:
@@ -2917,6 +2946,13 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
 
     sec = cfg[kind]
     name = "升級" if kind == "levelup" else "寶箱"
+    if kind == "chest" and sec.get("auto", False):
+        ab = next((i for i in items if match(i["text"], "自動寶箱")), None)
+        if ab:
+            time.sleep(random.uniform(*sec.get("think_sec", [0.2, 0.5])))
+            pos = inp.click_item(ab, "自動寶箱") or (round(ab["cx"]), round(ab["cy"]))
+            log(f"寶箱選單 → 按「自動寶箱」（點擊 {pos[0]},{pos[1]}）")
+            return True
     cards = find_cards(items, rect[3], frame, ox, oy)
     if len(cards) < 3 and cfg["menu_ocr_scale"] < 1.5:
         # 三張卡沒讀齊 → 放大再讀一次，取讀到比較多張的結果
