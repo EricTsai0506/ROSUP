@@ -21,6 +21,7 @@ import updater
 # 沒有線上更新的版本：程式資料夾裡有 no_update.flag 這個檔案
 NO_UPDATE = os.path.exists(os.path.join(rb.BASE_DIR, "no_update.flag"))
 import licensing
+licensing.APP_VERSION = getattr(rb, "VERSION", "")
 
 APP_TITLE = "掛機小幫手"
 DEITY_NONE = "不選（自己選）"

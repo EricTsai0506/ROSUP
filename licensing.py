@@ -1,7 +1,12 @@
 """序號授權：機器碼、序號驗證、到期檢查。
 
 序號 = 內容（版本、機器碼雜湊、開通日、到期日）+ 作者私鑰的 Ed25519 簽章。
-程式裡只有公鑰，只能驗證、不能產生序號；離線也能驗證，不需要伺服器。
+程式裡只有公鑰，只能驗證、不能產生序號。
+
+線上驗證（LICENSE_URL 有設定時）：開程式時和之後每 6 小時問一次賣家的驗證伺服器
+（Cloudflare Worker），伺服器可以停用序號、改到期日，並用伺服器的日期判斷到期。
+伺服器的回應有簽章（SERVER_PUBLIC_KEY_HEX 驗證），無法偽造。
+連不上伺服器時，最後一次驗證成功後 3 天內照常使用。
 """
 import base64
 import datetime as dt
@@ -11,11 +16,20 @@ import os
 import struct
 import sys
 import time
+import urllib.request
+import uuid
 
 PUBLIC_KEY_HEX = "29b2500b132fb7ccf147ac3d464981c57e28a1ce2cec313fe53ce6c9ee4ea839"
 EPOCH = dt.date(2020, 1, 1)
 FMT = ">B8sHH"            # 版本、機器碼雜湊 8 bytes、開通日、到期日（距 2020-01-01 的天數）
 VERSION = 1
+
+# 線上驗證伺服器（空字串 = 只用離線驗證）
+LICENSE_URL = ""
+SERVER_PUBLIC_KEY_HEX = "0849bf22a86622dec45c4e6a537b613a21cc9b4f9eca5b3d5ba61493b7072d17"
+ONLINE_EVERY = 6 * 3600          # 驗證成功後幾秒內不再問伺服器
+GRACE_SEC = 3 * 86400            # 連不上伺服器時，最後一次成功後還能用多久
+APP_VERSION = ""                 # gui 啟動時填入程式版本（給管理頁看）
 
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
@@ -144,8 +158,67 @@ def trusted_today():
     return dt.date.fromtimestamp(now)
 
 
+# ---------------- 線上驗證 ----------------
+def _key_id(key):
+    return hashlib.sha256(_unb32(key)).hexdigest()[:16]
+
+
+def _query_server(key):
+    """問驗證伺服器；回傳伺服器簽過名的結果 dict，連不上或回應不對就丟出例外"""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    nonce = uuid.uuid4().hex
+    body = json.dumps({"key": key, "machine": machine_hash().hex().upper(), "nonce": nonce,
+                       "app_ver": APP_VERSION}).encode()
+    req = urllib.request.Request(LICENSE_URL.rstrip("/") + "/v1/check", data=body, method="POST",
+                                 headers={"content-type": "application/json",
+                                          "user-agent": "hangji-helper"})
+    import ssl
+    with urllib.request.urlopen(req, timeout=8, context=ssl.create_default_context()) as r:
+        resp = json.loads(r.read().decode())
+    p, sig = resp["p"], base64.b64decode(resp["s"])
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(SERVER_PUBLIC_KEY_HEX)).verify(sig, p.encode())
+    res = json.loads(p)
+    if res.get("nonce") != nonce:
+        raise ValueError("驗證伺服器回應不符")
+    return res
+
+
+def online_check(key, force=False):
+    """回傳 None（沒設定伺服器）或 {"status": ok/revoked/expired/bad/offline, "msg", "end"}"""
+    if not LICENSE_URL:
+        return None
+    now = time.time()
+    st = _load_state()
+    kid = _key_id(key)
+    on = st.get("online") if isinstance(st.get("online"), dict) else {}
+    if on.get("kid") != kid:
+        on = {"kid": kid, "first": now}
+    ok_t = float(on.get("ok_t", 0))
+    if not force and on.get("status") == "ok" and 0 <= now - ok_t < ONLINE_EVERY:
+        return {"status": "ok", "msg": "", "end": on.get("end")}
+    try:
+        res = _query_server(key)
+    except Exception as e:
+        ref = ok_t or float(on.get("first", now))
+        on.setdefault("first", now)
+        st["online"] = on
+        _save_state(st)
+        if 0 <= now - ref < GRACE_SEC and on.get("status") in (None, "ok"):
+            return {"status": "ok", "msg": "", "end": on.get("end"), "offline": True}
+        if on.get("status") not in (None, "ok"):
+            return {"status": on["status"], "msg": on.get("msg", ""), "end": on.get("end")}
+        return {"status": "offline", "end": on.get("end"),
+                "msg": f"連不上序號驗證伺服器超過 3 天（{type(e).__name__}），請確認網路後重開程式"}
+    on.update(status=res.get("status"), msg=res.get("msg", ""), end=res.get("end"))
+    if res.get("status") == "ok":
+        on["ok_t"] = now
+    st["online"] = on
+    _save_state(st)
+    return {"status": res.get("status"), "msg": res.get("msg", ""), "end": res.get("end")}
+
+
 # ---------------- 對外 ----------------
-def check(key=None):
+def check(key=None, force_online=False):
     """回傳 {"ok", "msg", "end", "days_left"}"""
     if key is None:
         try:
@@ -161,6 +234,18 @@ def check(key=None):
         today = trusted_today()
     except ValueError as e:
         return {"ok": False, "msg": str(e), "end": None, "days_left": 0}
+    end = info["end"]
+    on = online_check(key, force_online)
+    if on is not None:
+        if on["status"] == "ok":
+            if on.get("end"):            # 伺服器可以延長或縮短到期日
+                try:
+                    end = dt.date.fromisoformat(on["end"])
+                except ValueError:
+                    pass
+        else:
+            return {"ok": False, "msg": on.get("msg") or "序號驗證失敗", "end": end, "days_left": 0}
+    info = dict(info, end=end)
     left = (info["end"] - today).days
     if left <= 0:
         return {"ok": False, "msg": f"授權已於 {info['end']} 到期，請購買新的月卡",
@@ -170,7 +255,7 @@ def check(key=None):
 
 
 def activate(key):
-    r = check(key.strip())
+    r = check(key.strip(), force_online=True)
     if r["ok"]:
         with open(LICENSE_FILE, "w", encoding="utf-8") as f:
             f.write(key.strip())
