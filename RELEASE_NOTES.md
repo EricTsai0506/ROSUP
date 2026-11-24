@@ -1,3 +1,8 @@
+v1.6.2 修正部分電腦「檢查更新失敗：CERTIFICATE_VERIFY_FAILED」
+
+- 有些電腦的 Windows 根憑證不完整，檢查更新時出現 SSL: CERTIFICATE_VERIFY_FAILED（unable to get local issuer certificate）。程式現在內附一份根憑證清單，Windows 缺的時候也能連上 GitHub 更新
+- 已經遇到這個錯誤的人：這一次請到 Discord 下載 v1.6.2 手動解壓覆蓋，之後就能正常線上更新
+
 v1.6.1 自動選神祇
 
 - 遊戲新功能：角色 20 等後，神祇不再出現在寶箱裡，改成道具欄旁邊出現「!」按鈕。程式看到「!」會自動點開「選擇你的神祇」，選設定的那一個（預設雷擊術）

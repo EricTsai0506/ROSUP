@@ -31,6 +31,25 @@ def parse_ver(v):
     return tuple(out + [0] * (3 - len(out)))
 
 
+_CTX = None
+
+
+def _ssl_ctx():
+    """Windows 憑證 + 程式內附的 certifi 根憑證。
+    有些電腦的 Windows 根憑證不完整（沒自動更新），只用 Windows 的會出現
+    CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate"""
+    global _CTX
+    if _CTX is None:
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx.load_verify_locations(cafile=certifi.where())
+        except Exception:
+            pass
+        _CTX = ctx
+    return _CTX
+
+
 def _get(url, token="", timeout=15):
     req = urllib.request.Request(url, headers={
         "User-Agent": "RoBot-updater",
@@ -38,7 +57,7 @@ def _get(url, token="", timeout=15):
     })
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())
+    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx())
 
 
 def check(repo, current, token=""):
@@ -79,7 +98,7 @@ def download(info, token="", progress=None):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("Accept", "application/octet-stream")
-    with urllib.request.urlopen(req, timeout=60, context=ssl.create_default_context()) as r, \
+    with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx()) as r, \
             open(zpath, "wb") as f:
         total = int(r.headers.get("Content-Length") or info.get("size") or 0)
         done = 0
