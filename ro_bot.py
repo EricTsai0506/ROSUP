@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.0"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.1"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -384,6 +384,12 @@ DEFAULT_CONFIG = {
         "window_size": [1280, 960],
         "lock_window_size": True,
         "restart_hours": 6,          # 背景模式：每幾小時重開一次遊戲用的 Edge（一局打完時；0 = 不重開）
+    },
+    "deity": {
+        "enabled": True,             # 20 等後道具欄旁的「!」→ 打開選神祇
+        "choice": "雷擊術",
+        "order": ["雷擊術", "火箭術", "冰箭術", "雷爆術"],
+        "think_sec": [0.3, 0.8],
     },
     "schedule": {
         "enabled": False,
@@ -1029,6 +1035,97 @@ def is_expedition(items):
         (n_pass >= 1 and n_mvp >= 1 and any(stage_of(i["text"]) for i in items))
 
 
+def find_deity_button(frame):
+    """戰鬥畫面下方道具欄旁的「!」按鈕（淡紫色方塊、中間紫色驚嘆號）。回傳 (x, y, 分數) 或 None"""
+    H, W = frame.shape[:2]
+    y0, y1, x0, x1 = int(H * 0.68), int(H * 0.97), int(W * 0.25), int(W * 0.8)
+    roi = frame[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    ink = ((h >= 118) & (h <= 140) & (s >= 40) & (s <= 170) & (v >= 90) & (v <= 235)).astype(np.uint8)
+    n, lab, stats, cents = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    comps = [tuple(int(t) for t in stats[k]) for k in range(1, n) if stats[k][4] >= 4]
+    cands = []
+    for (x, y, w, hh, area) in comps:
+        if hh < H * 0.007 or hh > H * 0.04 or hh < 1.3 * w or area < 0.4 * w * hh:
+            continue
+        cx = x + w / 2
+        # 驚嘆號的點：在正下方、比較小
+        dot = None
+        for (x2, y2, w2, h2, a2) in comps:
+            if (x2, y2) == (x, y):
+                continue
+            if abs((x2 + w2 / 2) - cx) <= max(2, w * 0.8) and 0 <= y2 - (y + hh) <= max(3, hh * 0.6) \
+                    and h2 <= hh * 0.8 and w2 <= w * 1.6:
+                dot = (x2, y2, w2, h2)
+                break
+        if dot is not None:
+            top, bot = y, dot[1] + dot[3]
+        elif hh >= 2.2 * w:
+            top, bot = y, y + hh
+        else:
+            continue
+        tot = bot - top
+        if not (H * 0.012 <= tot <= H * 0.055):
+            continue
+        cy = (top + bot) / 2
+        r = int(tot * 1.05)
+        bx0, by0 = int(max(0, cx - r)), int(max(0, cy - r))
+        bx1, by1 = int(min(roi.shape[1], cx + r)), int(min(roi.shape[0], cy + r))
+        if bx1 - bx0 < r or by1 - by0 < r:
+            continue
+        hb, sb, vb = h[by0:by1, bx0:bx1], s[by0:by1, bx0:bx1], v[by0:by1, bx0:bx1]
+        ib = ink[by0:by1, bx0:bx1].astype(bool)
+        bg = ~ib
+        pale = (sb < 45) & (vb > 220) & (hb >= 110) & (hb <= 150)
+        frac = float(pale[bg].mean()) if bg.sum() >= 20 else 0.0
+        if frac >= 0.7 and ib.mean() < 0.25:
+            cands.append((frac + (0.1 if dot else 0), x0 + cx, y0 + cy))
+    if not cands:
+        return None
+    sc, px, py = max(cands)
+    return (px, py, sc)
+
+
+DEITY_CHOICES = ["雷擊術", "火箭術", "冰箭術", "雷爆術"]
+
+
+def handle_deity(frame, items, rect, cfg, inp):
+    """「選擇你的神祇」（角色 20 等後按道具欄旁的「!」打開）：選設定的那一個"""
+    sec = cfg.get("deity", {})
+    want = sec.get("choice", "雷擊術")
+    cards = []
+    for i in items:
+        if "deity" not in i["n"]:
+            continue
+        t = re.sub(r"(?i)deity", "", i["text"]).strip()
+        if len(re.sub(r"\W", "", t)) < 2:       # 名字和 Deity 被拆成兩段 → 接左邊那段
+            left = [j for j in items if j is not i and abs(j["cy"] - i["cy"]) < i["h"] * 0.6
+                    and 0 <= i["x"] - (j["x"] + j["w"]) < i["h"] * 1.5]
+            t = left[0]["text"] if left else t
+        nm = canon_skill(t)
+        if nm:
+            cards.append((nm, i))
+    order = [want] + [n for n in sec.get("order", DEITY_CHOICES) if n != want]
+    pick = next(((n, c) for w in order for n, c in cards if n == w), None)
+    if pick is None:
+        GAME["deity_fail"] = GAME.get("deity_fail", 0) + 1
+        if GAME["deity_fail"] >= 3:
+            log("選神祇：讀不到卡片名稱 → 先關掉，5 分鐘後再試（畫面存在 logs\\menu_deity_*）")
+            save_snapshot(frame, "menu_deity", items=[dict(i, x=i["x"] - rect[0], y=i["y"] - rect[1]) for i in items])
+            inp.press("escape")
+            GAME.update(deity_fail=0, deity_off_until=time.time() + 300)
+        time.sleep(0.5)
+        return True
+    nm, c = pick
+    log(f"選神祇：{nm}" + ("" if nm == want else f"（沒看到設定的「{want}」）")
+        + f"，畫面上有：{'、'.join(n for n, _ in cards)}")
+    inp.click_item(c, nm + " Deity")
+    GAME.update(deity_fail=0, deity_clicks=0, deity_done=nm)
+    time.sleep(random.uniform(0.6, 1.0))
+    return True
+
+
 def detect_menu(items):
     """回傳 'lobby'、'result'、'levelup'、'chest' 或 None"""
     joined = " ".join(i["n"] for i in items)
@@ -1062,6 +1159,10 @@ def detect_menu(items):
     level = any(i["n"].startswith("技能") and SLOT_RE.match(i["n"]) for i in items) \
         or any(re.search(r"升[级級]\s*[!！]", i["text"]) for i in items) \
         or "选择技能" in joined or "强化技能" in joined
+    # 選擇你的神祇（20 等後按「!」打開；標題常讀成「選摆你的神裤」）
+    deity = "你的神" in joined or "每10级升" in joined or ("只有一" in joined and "deity" in joined)
+    if deity and not chest:
+        return "deity"
     if chest:
         return "chest"
     if level:
@@ -3063,7 +3164,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
         GAME["phase"], GAME["battle_seen"] = "battle", time.time()
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
                     maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0,
-                    late_logged=False, focused=set(), focus_off=False)
+                    late_logged=False, focused=set(), focus_off=False, deity_clicks=0, deity_off_until=0)
         log("進入戰鬥")
         return "acted"
 
@@ -3554,6 +3655,9 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
 
     if kind == "expedition":
         return handle_expedition(frame, items, rect, cfg, inp)
+
+    if kind == "deity":
+        return handle_deity(frame, items, rect, cfg, inp)
 
     if kind in ("afk", "login", "charselect"):
         return handle_login(kind, frame, items, rect, cfg, inp)
@@ -4454,6 +4558,7 @@ def run(cfg):
            "path_next": 0, "path_tgt": None, "path_dir": None}
     vp_next = 0
     panel_next = 0
+    deity_next = 0
     zoom_at, was_battle = 0, False
     bumps, mm_snap_next = 0, 0
     boss_cap = {"games": 0, "next": 0.0, "game": None}
@@ -4741,6 +4846,28 @@ def run(cfg):
                         inp.scroll(ox + W * 0.75, oy + H * 0.45, zn, "拉大視野")
                         park_mouse(rect)
                         continue
+                # 20 等後道具欄旁出現「!」→ 點開「選擇你的神祇」（選單由 handle_deity 處理）
+                dcfg_ = cfg.get("deity", {})
+                if now >= deity_next and dcfg_.get("enabled", True) and not dry \
+                        and now >= GAME.get("deity_off_until", 0):
+                    deity_next = now + 2.0
+                    hit_ = find_deity_button(frame)
+                    if hit_:
+                        if GAME.get("deity_clicks", 0) >= 3:
+                            GAME.update(deity_clicks=0, deity_off_until=now + 180)
+                            log("點了「!」3 次都沒出現選神祇的畫面 → 3 分鐘後再試")
+                            save_snapshot(frame, "deity_button")
+                        else:
+                            GAME["deity_clicks"] = GAME.get("deity_clicks", 0) + 1
+                            MOVER.set(None, False)
+                            time.sleep(0.15)
+                            s_ = H * 0.03
+                            log("道具欄旁邊出現「!」→ 點開選神祇")
+                            inp.click_item({"text": "!", "x": ox + hit_[0] - s_ / 2, "y": oy + hit_[1] - s_ / 2,
+                                            "w": s_, "h": s_}, "神祇「!」")
+                            deity_next = now + 2.5
+                            park_mouse(rect)
+                            continue
                 # 誤點技能欄跳出的說明框 → 關掉
                 if now >= panel_next:
                     panel_next = now + 1.0

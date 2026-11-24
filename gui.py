@@ -23,6 +23,7 @@ NO_UPDATE = os.path.exists(os.path.join(rb.BASE_DIR, "no_update.flag"))
 import licensing
 
 APP_TITLE = "掛機小幫手"
+DEITY_NONE = "不選（自己選）"
 CHEST_EFFECT = dict(getattr(rb, "CHEST_ITEMS", []))
 CHEST_CAT = dict(getattr(rb, "CHEST_CATEGORY", {}))
 SKILLS = ["火箭術", "冰箭術", "雷擊術", "聖靈召喚", "心靈爆破",
@@ -114,6 +115,10 @@ class App:
         except ValueError:
             pass
         c["levelup"]["rarity_first"] = self.v_rarity.get()
+        dv = self.v_deity.get()
+        c.setdefault("deity", {})["enabled"] = dv != DEITY_NONE
+        if dv in rb.DEITY_CHOICES:
+            c["deity"]["choice"] = dv
         c["levelup"]["auto_after_banish"] = self.v_autopick.get()
         c["chest"]["auto"] = self.v_chest_auto.get()
         try:
@@ -372,6 +377,12 @@ class App:
         ttk.Label(mxf, text="角色等級達到 Lv").pack(side="left")
         ttk.Spinbox(mxf, from_=0, to=999, width=5, textvariable=self.v_maxlv).pack(side="left", padx=4)
         ttk.Label(mxf, text="之後不再升級（0 = 不限）").pack(side="left")
+        self.v_deity = tk.StringVar()
+        dyf = ttk.Frame(f2)
+        dyf.grid(row=7, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(dyf, text="神祇（角色 20 等後道具欄旁的「!」）：選").pack(side="left")
+        ttk.Combobox(dyf, textvariable=self.v_deity, state="readonly", width=12,
+                     values=rb.DEITY_CHOICES + [DEITY_NONE]).pack(side="left", padx=4)
         ttk.Checkbutton(f2, text="卡片等級（普通<優良<稀有<史詩<傳說）最優先，同等級再看效果",
                         variable=self.v_rarity).grid(row=3, column=0, columnspan=2, sticky="w",
                                                      pady=4)
@@ -546,6 +557,8 @@ class App:
                               any(rb.match(n, k) and rb.match(k, n) for k in ban))
         self.v_until.set(str(c["levelup"].get("target_until_level", 11)))
         self.v_rarity.set(c["levelup"].get("rarity_first", False))
+        dc = c.get("deity", {})
+        self.v_deity.set(dc.get("choice", "雷擊術") if dc.get("enabled", True) else DEITY_NONE)
         self.v_autopick.set(c["levelup"].get("auto_after_banish", False))
         self.v_chest_auto.set(c["chest"].get("auto", False))
         sch = c.get("schedule", {})
