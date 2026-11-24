@@ -99,6 +99,7 @@ class App:
         c["window_title"] = self.v_title.get().strip()
         c.setdefault("browser", {})["mode"] = self.v_mode.get() or "cdp"
         c["browser"]["lock_window_size"] = self.v_lockwin.get()
+        c.setdefault("perf", {})["level"] = self.v_perf.get()
         try:
             c["browser"]["restart_hours"] = max(0.0, float(self.v_restart.get() or 0))
         except ValueError:
@@ -250,6 +251,15 @@ class App:
                                                                               padx=4)
         ttk.Label(ef, text="第一次請在裡面登入遊戲；不要縮到最小",
                   foreground="#666").pack(side="left", padx=6)
+        self.v_perf = tk.StringVar(value="normal")
+        pff = ttk.Frame(f1)
+        pff.grid(row=17, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(pff, text="效能：").pack(side="left")
+        for key_, txt_ in (("eco", "省資源"), ("normal", "標準（推薦）"), ("high", "高效能")):
+            ttk.Radiobutton(pff, text=txt_, value=key_, variable=self.v_perf,
+                            command=lambda: rb.apply_perf(self.v_perf.get())).pack(side="left", padx=2)
+        ttk.Label(pff, text="省資源：電腦比較不卡、反應慢一點；高效能：反應最快、比較吃 CPU",
+                  foreground="#666").pack(side="left", padx=6)
         self.v_restart = tk.StringVar()
         rsf = ttk.Frame(f1)
         rsf.grid(row=16, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -315,7 +325,7 @@ class App:
                      state="readonly", width=26).grid(row=1, column=1, sticky="w", padx=6, pady=2)
         ttk.Label(sf, text="遠征會走到遠征隊長、選關、出發；難度在按「前往野外」前調整",
                   foreground="#666").grid(row=2, column=0, columnspan=2, sticky="w")
-        keep = {lg, uf, mf, ef, af, sf, dodge_cb, rsf}   # 精簡介面時基本頁只留這幾區（加上頭目閃避）
+        keep = {lg, uf, mf, ef, af, sf, dodge_cb, rsf, pff}   # 精簡介面時基本頁只留這幾區（加上頭目閃避）
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.v_route = tk.BooleanVar()
@@ -519,6 +529,7 @@ class App:
         self.v_title.set(c.get("window_title", ""))
         self.v_mode.set(c.get("browser", {}).get("mode", "screen"))
         self.v_lockwin.set(c.get("browser", {}).get("lock_window_size", True))
+        self.v_perf.set(c.get("perf", {}).get("level", "normal"))
         self.v_restart.set(f'{float(c.get("browser", {}).get("restart_hours", 6)):g}')
         self.v_dry.set(c.get("dry_run", False))
         self.v_lv.set(c["levelup"]["enabled"])

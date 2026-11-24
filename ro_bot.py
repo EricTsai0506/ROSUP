@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.2"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.3"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -385,6 +385,7 @@ DEFAULT_CONFIG = {
         "lock_window_size": True,
         "restart_hours": 6,          # 背景模式：每幾小時重開一次遊戲用的 Edge（一局打完時；0 = 不重開）
     },
+    "perf": {"level": "normal"},     # eco 省資源／normal 標準／high 高效能
     "deity": {
         "enabled": True,             # 20 等後道具欄旁的「!」→ 打開選神祇
         "choice": "雷擊術",
@@ -860,6 +861,37 @@ _engines_lock = threading.Lock()
 
 _threads_limited = False
 
+# 效能等級：畫面張數、背景辨識間隔、主迴圈休息、辨識用幾個核心、程式優先順序
+PERF_LEVELS = {
+    "eco":    {"label": "省資源", "frame": 0.2, "watch": 0.35, "loop": 0.04, "threads": 1, "prio": "below"},
+    "normal": {"label": "標準", "frame": 0.1, "watch": 0.12, "loop": 0.0, "threads": 0, "prio": "below"},
+    "high":   {"label": "高效能", "frame": 0.066, "watch": 0.06, "loop": 0.0, "threads": -1, "prio": "normal"},
+}
+PERF = dict(PERF_LEVELS["normal"], level="normal")
+
+
+def ocr_threads(level=None):
+    n_cpu = os.cpu_count() or 4
+    t = PERF_LEVELS.get(level or PERF["level"], PERF_LEVELS["normal"])["threads"]
+    if t == 0:
+        return max(1, min(3, n_cpu // 4))
+    if t < 0:
+        return max(1, min(6, n_cpu // 2))
+    return t
+
+
+def apply_perf(level):
+    """切換效能等級；掛機中也會馬上生效（辨識用的核心數下次按開始才換）"""
+    level = level if level in PERF_LEVELS else "normal"
+    PERF.update(PERF_LEVELS[level], level=level)
+    try:
+        page = getattr(IO, "page", None)
+        if page is not None:
+            page.frame_interval = PERF["frame"]
+    except Exception:
+        pass
+    set_own_priority(PERF["prio"])
+
 
 def _limit_ocr_threads():
     """辨識引擎預設會用滿所有 CPU 核心；限制成少數幾個，避免拖慢遊戲和其他程式"""
@@ -870,7 +902,7 @@ def _limit_ocr_threads():
     try:
         import onnxruntime as ort
         import rapidocr_onnxruntime.utils as ru
-        n = max(1, min(3, (os.cpu_count() or 4) // 4))
+        n = ocr_threads()
 
         def _opts():
             o = ort.SessionOptions()
@@ -884,13 +916,18 @@ def _limit_ocr_threads():
         pass
 
 
-def lower_own_priority():
-    """把本程式的優先順序調成『低於一般』：CPU 不夠時讓遊戲和其他程式先跑"""
+def set_own_priority(prio="below"):
+    """本程式的優先順序：below＝低於一般（CPU 不夠時讓遊戲和其他程式先跑）、normal＝一般"""
     if IS_WIN:
         try:
-            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00004000)
+            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(),
+                                      0x00000020 if prio == "normal" else 0x00004000)
         except Exception:
             pass
+
+
+def lower_own_priority():
+    set_own_priority(PERF.get("prio", "below"))
 
 
 def get_ocr(name="main"):
@@ -2047,7 +2084,7 @@ class OcrWatcher(threading.Thread):
                 except Exception as e:
                     log(f"背景辨識錯誤：{e}")
                     time.sleep(0.5)
-                time.sleep(0.12)
+                time.sleep(PERF["watch"])
 
 
 # =====================================================================
@@ -4468,6 +4505,7 @@ def run(cfg):
             return
         page = bc.CdpPage(int(bcfg.get("port", 9229)), "ro-survivors", log=log)
         IO = CdpIO(page)
+        page.frame_interval = PERF["frame"]
         edge_t0 = time.time()
         if bcfg.get("lock_window_size", True):
             try:
@@ -4497,6 +4535,14 @@ def run(cfg):
         except Exception:
             pass
 
+    lvl_ = cfg.get("perf", {}).get("level", "normal")
+    global _threads_limited
+    if _threads_limited and ocr_threads(lvl_) != ocr_threads():
+        with _engines_lock:
+            _engines.clear()            # 辨識核心數不同 → 重新建立辨識引擎
+        _threads_limited = False
+    apply_perf(lvl_)
+    log(f"效能：{PERF['label']}")
     lower_own_priority()
     log("載入文字辨識模型…")
     get_ocr("main")
@@ -4567,6 +4613,8 @@ def run(cfg):
     try:
         with _new_mss() as sct:
             while True:
+                if PERF["loop"]:
+                    time.sleep(PERF["loop"])        # 省資源：主迴圈每圈多休息一下
                 if hot.hit("F9") or CONTROL["stop"]:
                     log("停止")
                     break
@@ -4801,6 +4849,7 @@ def run(cfg):
                             raise RuntimeError("定時重開 Edge 失敗")   # 交給自動重新開始處理
                         page = new_page
                         IO = CdpIO(page)
+                        page.frame_interval = PERF["frame"]
                         edge_t0 = time.time()
                         watcher.paused = False
                         st_town.clear()
