@@ -25,7 +25,7 @@ FMT = ">B8sHH"            # 版本、機器碼雜湊 8 bytes、開通日、到�
 VERSION = 1
 
 # 線上驗證伺服器（空字串 = 只用離線驗證）
-LICENSE_URL = ""
+LICENSE_URL = "https://rosup-license-rice-0162.yowlin0506.workers.dev"
 SERVER_PUBLIC_KEY_HEX = "0849bf22a86622dec45c4e6a537b613a21cc9b4f9eca5b3d5ba61493b7072d17"
 ONLINE_EVERY = 6 * 3600          # 驗證成功後幾秒內不再問伺服器
 GRACE_SEC = 3 * 86400            # 連不上伺服器時，最後一次成功後還能用多久
