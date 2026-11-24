@@ -969,11 +969,8 @@ class App:
                        "詳細記錄在 logs\\update.log")
 
     def ask_update(self, info, token):
-        notes = info["notes"].strip() or "（沒有寫更新內容）"
-        if len(notes) > 900:
-            notes = notes[:900] + "…"
         if not messagebox.askyesno(
-                APP_TITLE, f"有新版本 v{info['version']}（目前 v{rb.VERSION}）\n\n{notes}\n\n"
+                APP_TITLE, f"有新版本 v{info['version']}（目前 v{rb.VERSION}）\n\n"
                            "要現在更新嗎？（設定、記住的路線、登入資料都會保留，更新完會自動重開）"):
             return
         if self.thread and self.thread.is_alive():
