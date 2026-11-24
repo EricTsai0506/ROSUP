@@ -152,7 +152,8 @@ class App:
         c["chest"]["priority_late"] = list(self.chest_lists["late"]) if self.late_custom else []
         c["chest"]["prefer_rarity"] = self.v_chest_rarity.get()
         for key_, var_ in (("reroll_rank", self.v_chest_rr), ("banish_rank", self.v_chest_br),
-                           ("focus_rank", self.v_chest_fr), ("late_from", self.v_chest_late)):
+                           ("focus_rank", self.v_chest_fr), ("focus_late_rank", self.v_chest_fr2),
+                           ("late_from", self.v_chest_late)):
             try:
                 c["chest"][key_] = max(0, int(var_.get()))
             except ValueError:
@@ -449,11 +450,16 @@ class App:
         ttk.Spinbox(rbf, from_=0, to=99, width=4, textvariable=self.v_chest_fr).grid(row=2, column=1)
         ttk.Label(rbf, text="名的卡 → 先按「專注」再選（之後更常出現；每種每局一次，0 = 不用）").grid(
             row=2, column=2, sticky="w")
+        self.v_chest_fr2 = tk.StringVar()
+        ttk.Label(rbf, text="排名在前").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(rbf, from_=0, to=99, width=4, textvariable=self.v_chest_fr2).grid(row=3, column=1)
+        ttk.Label(rbf, text="名的卡 → 第 4 分鐘後專注還沒用完也專注（每局有 2 次，0 = 不放寬）").grid(
+            row=3, column=2, sticky="w")
         self.v_chest_late = tk.StringVar()
-        ttk.Label(rbf, text="遊戲時間第").grid(row=3, column=0, sticky="w")
-        ttk.Spinbox(rbf, from_=0, to=20, width=4, textvariable=self.v_chest_late).grid(row=3, column=1)
+        ttk.Label(rbf, text="遊戲時間第").grid(row=4, column=0, sticky="w")
+        ttk.Spinbox(rbf, from_=0, to=20, width=4, textvariable=self.v_chest_late).grid(row=4, column=1)
         ltf = ttk.Frame(rbf)
-        ltf.grid(row=3, column=2, sticky="w")
+        ltf.grid(row=4, column=2, sticky="w")
         ttk.Label(ltf, text="分鐘起改用「後期排名」（0 = 不分前後期）").pack(side="left")
         ttk.Button(ltf, text="後期排名重設成跟前期一樣", command=self.reset_late).pack(side="left", padx=6)
         ttk.Checkbutton(f4, text="清單以外的寶箱，選卡片等級高的（普通<優良<稀有<史詩<傳說）",
@@ -560,6 +566,7 @@ class App:
         self.v_chest_rr.set(str(c["chest"].get("reroll_rank", 10)))
         self.v_chest_br.set(str(c["chest"].get("banish_rank", 0)))
         self.v_chest_fr.set(str(c["chest"].get("focus_rank", 3)))
+        self.v_chest_fr2.set(str(c["chest"].get("focus_late_rank", 8)))
         self.v_chest_late.set(str(c["chest"].get("late_from", 7)))
         pri = c["levelup"].get("priority", [])
         ban = c["levelup"].get("banish", [])
@@ -641,9 +648,32 @@ class App:
         return r
 
     def startup_license(self):
-        r = self.refresh_license()
-        if not r["ok"]:
-            self.show_activate()
+        # 開程式時的檢查可能要連網，放到背景做，視窗才不會卡住
+        self.lic_label.config(text="授權檢查中…", foreground="#666")
+
+        box = {}
+
+        def work():
+            try:
+                box["r"] = licensing.check()
+            except Exception as e:
+                box["r"] = {"ok": False, "msg": f"授權檢查失敗：{e}", "end": None, "days_left": 0}
+
+        def poll():                     # 介面只能在主執行緒改，所以用輪詢接結果
+            if "r" in box:
+                done(box["r"])
+            else:
+                self.root.after(100, poll)
+
+        def done(r):
+            self.lic = r
+            color = "#1a7f37" if r["ok"] and r["days_left"] > 3 else ("#c08000" if r["ok"] else "#c0392b")
+            txt = r["msg"] + ("　快到期了，記得續購" if r["ok"] and r["days_left"] <= 3 else "")
+            self.lic_label.config(text=txt, foreground=color)
+            if not r["ok"]:
+                self.show_activate()
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(100, poll)
 
     def show_activate(self):
         win = tk.Toplevel(self.root)

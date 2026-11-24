@@ -358,19 +358,35 @@ class BossDodge:
 
 def boss_bar(frame):
     """畫面上方中間有沒有頭目／MVP 的血條。
-    血條一定從固定位置（畫面寬 26.7% 左右）開始往右填滿，扣血從右邊減少；
-    所以看「從那個位置開始的一段紅／橘色」，地圖上的紅色東西不會剛好在那裡"""
+    血條從固定位置（畫面寬 26.7% 左右）開始往右填滿，扣血從右邊減少。
+    只看「那個位置有一段紅／橘色」會被飄過去的傷害數字、火焰、地上的紅色預警騙到，
+    所以還要看血條的外框：紅／橘色那一段的正下方，有一條橫跨整條血條的淺灰色細線"""
     H, W = frame.shape[:2]
     y0, x0 = int(H * 0.17), int(W * 0.25)
-    band = frame[y0:int(H * 0.25), x0:int(W * 0.75)].astype(np.int16)
+    k = W / 1264.0
+    extra = 2 + int(round(10 * k))                # 外框在血條下面幾個像素
+    band = frame[y0:int(H * 0.25) + extra, x0:int(W * 0.75)].astype(np.int16)
     b, g, r = band[:, :, 0], band[:, :, 1], band[:, :, 2]
     red = ((r > 120) & (r - g > 60) & (r - b > 50)).astype(np.int8)
+    mx, mn = np.maximum(np.maximum(r, g), b), np.minimum(np.minimum(r, g), b)
+    light = (mn > 125) & (mx - mn < 50)
     lo, hi = int(W * 0.255) - x0, int(W * 0.29) - x0
     need = max(12, int(W * 0.015))
-    for row in red:
+    span = int(W * 0.40)                          # 血條全長約 47% 畫面寬
+    n = red.shape[0] - extra
+    line_ok = {}
+    for yi in range(n):
+        row = red[yi]
         d = np.diff(np.concatenate(([0], row, [0])))
         st, en = np.where(d == 1)[0], np.where(d == -1)[0]
         for a_, e_ in zip(st, en):
             if lo <= a_ <= hi and e_ - a_ >= need:
-                return True
+                a_ = int(a_)
+                for q in range(yi + 1, yi + 1 + extra):
+                    key = (q, a_ // 4)
+                    if key not in line_ok:
+                        line_ok[key] = light[q, a_:a_ + span].mean() >= 0.7
+                    if line_ok[key]:
+                        return True
+                break
     return False

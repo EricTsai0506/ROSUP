@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.5"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.6"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -341,6 +341,8 @@ DEFAULT_CONFIG = {
         "reroll_rank": 10,           # 卡片排名在前 N 名之外 → 按那張卡下面的「重抽」（0 = 不重抽）
         "reroll_limit": 6,           # 每個寶箱選單最多重抽幾次
         "focus_rank": 3,             # 排名前 N 名的寶箱先按「專注」再選（之後更常出現）；0 = 不用
+        "focus_late_min": 4,         # 遊戲時間過了這幾分鐘、專注還沒用完 →
+        "focus_late_rank": 8,        # …排名前 N 名也專注（0 = 不放寬）
         "priority_late": [],         # 後期排名（空的 = 跟前期一樣）
         "late_from": 7,              # 遊戲時間第幾分鐘起改用後期排名（0 = 不分前後期）
         "new_item_rank": 10,         # 道具欄還沒滿時，新道具要在前 N 名內才拿（新道具會永久佔一格）；0 = 不限制
@@ -382,6 +384,7 @@ DEFAULT_CONFIG = {
         "crowd_kite": True,          # 「一大群怪物包圍」或 HP 幾秒內掉很多 → 往怪少、空曠的地方跑
         "hp_drop_kite": 0.15,        # 4.5 秒內掉超過最大 HP 的這個比例就跑
         "crowd_level": 0.55,         # 周圍「在動的東西」比例超過這個（而且掉血中）就當成被圍住
+        "swarm_kite_hp": 0.9,        # 出現「一大群怪物包圍」時，HP 低於這個比例才繞圈躲（1 = 每次都躲）
         "end_capture": 5,            # 一局提早結束（還沒到 13:50 就結束，多半是角色倒下）→ 存最後 20 秒截圖，每次啟動存幾場
     },
     "browser": {
@@ -2003,9 +2006,15 @@ class Planner:
         self.ignore_chest_until = 0
         self.target = None
         self.repick_at = 0
+        self.last_plan = 0
 
     def plan(self, coins, ores, chests, cx, cy, now, avoid=()):
         m = self.m
+        # 中間有一段時間沒在撿東西（躲避走位、選單）→ 那段不算進「寶箱一直撿不到」的時間
+        gap = now - self.last_plan
+        if self.last_plan and gap > 1.0 and self.mode == "chest":
+            self.since += gap
+        self.last_plan = now
         if avoid:  # 之前卡住、走不到的地方附近的東西先不追
             def ok(p):
                 return all(math.hypot(p[0] - a, p[1] - b) > 80 for a, b in avoid)
@@ -2130,6 +2139,7 @@ class OcrWatcher(threading.Thread):
                                     nm_ = re.sub(r"出現了|出现了|[!！\s]", "", nx_[0]["text"])
                             if nm_:
                                 upd["mvp_name"] = nm_[:8]
+                                upd["mvp_name_t"] = upd["t"]
                             break
                     now = time.time()
                     if now >= self.__dict__.get("lv_next", 0):
@@ -3281,7 +3291,8 @@ def town_ocr(frame, rect, cfg, inp, tst):
         GAME["phase"], GAME["battle_seen"] = "battle", time.time()
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
                     maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0,
-                    late_logged=False, focused=set(), focus_off=False, deity_clicks=0, deity_off_until=0)
+                    late_logged=False, focused=set(), focus_off=False, deity_clicks=0, deity_off_until=0,
+                    chest_pick=None)
         log("進入戰鬥")
         return "acted"
 
@@ -3854,6 +3865,12 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
         time.sleep(0.1)
         st["acted"] = False
         return True
+    # 寶箱：剛選完卡、關閉動畫還在播（畫面上還是同一個寶箱）→ 等它播完，不要對同一個畫面再動作
+    pk_ = GAME.get("chest_pick")
+    if kind == "chest" and pk_ and chest_stale(cards, pk_, time.time()):
+        time.sleep(0.2)
+        st["acted"] = False
+        return True
     GAME["last_sig"], GAME["last_sig_t"] = sig, time.time()
 
     log(f"{name}選單：" + "、".join(c["title"]["text"] for c in cards))
@@ -3870,6 +3887,22 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
         return True
 
     sec = dict(sec, priority=chest_priority(sec))   # 前期／後期排名
+    reread_ = [c for c in cards if chest_identify(c) is None and reread_chest_title(c, frame, ox, oy)]
+    if reread_:
+        log("  放大重讀：" + "、".join(c["title"]["text"] for c in reread_))
+    if any(chest_identify(c) is None for c in cards):
+        # 還有卡認不出來（多半是卡片正在滑進來、字還沒清楚）→ 等一下再看，最多等兩次
+        u_ = GAME.get("chest_unk") or {"n": 0, "t": 0}
+        if time.time() - u_["t"] > 5:
+            u_ = {"n": 0, "t": time.time()}
+        if u_["n"] < 2:
+            u_["n"] += 1
+            u_["t"] = time.time()
+            GAME["chest_unk"] = u_
+            GAME["last_sig"] = None
+            time.sleep(0.3)
+            st["acted"] = False
+            return True
     best = choose_card(cards, sec, read_slots(items, "道具"))
     st["ox"], st["oy"] = ox, oy
     if chest_rank_actions(cards, best, sec, inp, st, cfg.get("levelup", {})):
@@ -3891,6 +3924,10 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
     fsafe_ = bool(fb_) and (not fb_.get("estimated") or (
         not (best.get("reroll") or {"estimated": True}).get("estimated") and
         not (best.get("banish") or {"estimated": True}).get("estimated")))
+    # 每局有 2 次專注；過了幾分鐘還沒用完 → 名次放寬一點，不要浪費
+    fr2_ = int(sec.get("focus_late_rank", 8) or 0)
+    if fr2_ > fr_ and GAME.get("max_timer", 0) >= float(sec.get("focus_late_min", 4) or 0) * 60:
+        fr_ = fr2_
     if fr_ > 0 and best.get("rank") and best["rank"] <= fr_ and not GAME.get("focus_off") \
             and nm_ not in GAME.setdefault("focused", set()) and fsafe_:
         dis_f = button_really_disabled(st, best["focus"], "chest_f")
@@ -3920,6 +3957,8 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
             return True
     log(f"  選擇：{best['title']['text']}")
     pick_card(best, cards, items, inp, sec.get("number_keys", True))
+    parts_ = [_title_parts(c["title"]["text"]) for c in cards]
+    GAME["chest_pick"] = {"t": time.time(), "titles": parts_, "idx": cards.index(best)}
     st["acted"] = True
     return True
 
@@ -3986,6 +4025,71 @@ def skill_banish_done(cfg_lv):
             continue
         return False
     return True
+
+
+def _title_parts(text):
+    """卡片標題 → (名字, 等級)；「傷害藥水+6」→ ("伤害药水", 6)"""
+    m = re.search(r"\+\s*(\d+)\s*$", text or "")
+    base = norm(re.sub(r"\+\s*\d+\s*$", "", text or ""))
+    return base, int(m.group(1)) if m else 0
+
+
+def chest_stale(cards, pk, now):
+    """剛選完卡，畫面上還是同一個寶箱（關閉動畫還在播）？
+    選完後約 1～2 秒卡片還在畫面上，被選的那張標題會變淡、讀成亂碼；這時候不能再動作。
+    判斷：其他幾張卡的名字和等級都跟剛才一樣，而且被選的那張沒有升級。超過 3.5 秒就不再等。"""
+    dt_ = now - pk["t"]
+    if dt_ < 0 or dt_ > 3.5:
+        return False
+    if dt_ < 1.0:
+        return True
+    import difflib
+
+    def same(a, b):
+        return a[1] == b[1] and a[0] and b[0] and difflib.SequenceMatcher(None, a[0], b[0]).ratio() >= 0.7
+    cur = [_title_parts(c["title"]["text"]) for c in cards]
+    picked = pk["titles"][pk["idx"]]
+    # 被選的那一種道具出現、而且等級不一樣了 → 已經是下一個寶箱
+    if any(picked[0] and c[0] and c[1] != picked[1]
+           and difflib.SequenceMatcher(None, c[0], picked[0]).ratio() >= 0.7 for c in cur):
+        return False
+    others = [o for k_, o in enumerate(pk["titles"]) if k_ != pk["idx"]]
+    if not others:                       # 剛才只讀到一張卡：沒得比，等 2 秒
+        return dt_ < 2.0
+    n_same = sum(1 for o in others if any(same(o, c) for c in cur))
+    if n_same >= len(others):            # 其他幾張都一樣
+        return True
+    # 只對上一部分：這次少讀到卡、或有卡讀成亂碼（正在變淡）才算還在播動畫
+    garbled = sum(1 for c in cards if chest_identify(c) is None)
+    return n_same >= 1 and (len(cur) < len(pk["titles"]) or garbled >= 1)
+
+
+def reread_chest_title(c, frame, ox, oy):
+    """標題認不出是哪個寶箱（例如「採集藥水+8」讀成「集水+8」）→ 把標題那一塊放大再讀一次。
+    重讀後認得出來就換掉標題文字，回傳 True"""
+    if frame is None:
+        return False
+    t = c["title"]
+    x0 = int(max(0, t["cx"] - ox - max(t["w"], t["h"] * 7) * 0.75))
+    x1 = int(min(frame.shape[1], t["cx"] - ox + max(t["w"], t["h"] * 7) * 0.75))
+    y0 = int(max(0, t["y"] - oy - t["h"] * 0.5))
+    y1 = int(min(frame.shape[0], t["y"] - oy + t["h"] * 1.5))
+    if x1 - x0 < 10 or y1 - y0 < 6:
+        return False
+    for sc in (3.0, 2.2):
+        try:
+            its = ocr(frame[y0:y1, x0:x1].copy(), ox + x0, oy + y0, scale=sc, min_score=0.3)
+        except Exception:
+            return False
+        its = [i for i in its if len(re.sub(r"[\W\d]", "", i["text"])) >= 2]
+        if not its:
+            continue
+        its.sort(key=lambda i: i["x"])
+        text = "".join(i["text"] for i in its)
+        if chest_identify({"title": {"text": text, "n": norm(text)}, "lines": []}):
+            t["text"], t["n"] = text, norm(text)
+            return True
+    return False
 
 
 def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
@@ -4057,7 +4161,9 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     if rr > 0 and not GAME.get("chest_reroll_off") \
             and st.get("card_rerolls", 0) < int(sec.get("reroll_limit", 6) or 0):
         # 要拿的那張已經在前 N 名內（而且不是會佔欄位的爛新道具）→ 直接拿，不浪費重抽
-        bad = [c for c in cards if bad_for(c, rr) and not c["reroll"].get("unsafe")] if bad_for(best, rr) else []
+        # 只重抽「認得出來」的卡：標題讀錯、認不出是什麼的不重抽（可能其實是想要的卡）
+        bad = [c for c in cards if c.get("item") and bad_for(c, rr) and not c["reroll"].get("unsafe")] \
+            if bad_for(best, rr) else []
         dis_r = button_really_disabled(st, max(bad, key=rk)["reroll"], "chest_r") if bad else False
         if dis_r is None:
             time.sleep(0.6)
@@ -4564,6 +4670,8 @@ def run(cfg):
         return
     log(_lic["msg"])
     CONTROL["lic_next"] = time.time() + 600
+    CONTROL["lic_bad_t"] = 0
+    licensing._BG["res"] = None
     inp = Input(dry)
     log("模式：" + ("測試（只記錄、不操作）" if dry else "正式執行"))
     log("F8 暫停／繼續，F9 結束" + ("" if cfg.get("browser", {}).get("mode") == "cdp"
@@ -4698,13 +4806,22 @@ def run(cfg):
                 if hot.hit("F9") or CONTROL["stop"]:
                     log("停止")
                     break
-                if time.time() >= CONTROL.get("lic_next", 0):   # 每 10 分鐘確認一次授權
+                if time.time() >= CONTROL.get("lic_next", 0):   # 每 10 分鐘確認一次授權（在背景做，不卡住打怪）
                     CONTROL["lic_next"] = time.time() + 600
-                    _lic = licensing.check()
-                    if not _lic["ok"]:
+                    licensing.check_in_background()
+                _lic = licensing.background_result()
+                if _lic is not None and not _lic["ok"]:
+                    if not CONTROL.get("lic_bad_t"):
+                        CONTROL["lic_bad_t"] = time.time()
+                        if GAME.get("phase") == "battle":
+                            log(_lic["msg"] + " → 打完這一局就停止")
+                    # 正在打就讓這局打完（最多再等 20 分鐘），不要讓角色站在怪堆裡
+                    if GAME.get("phase") != "battle" or time.time() - CONTROL["lic_bad_t"] > 1200:
                         log(_lic["msg"] + " → 停止")
                         MOVER.set(None, False)
                         break
+                elif CONTROL.get("lic_bad_t"):
+                    CONTROL["lic_bad_t"] = 0
                 if hot.hit("F8") or CONTROL["toggle_pause"]:
                     CONTROL["toggle_pause"] = False
                     paused = not paused
@@ -5013,7 +5130,11 @@ def run(cfg):
                     GAME["bar_next"] = now + 0.5
                     try:
                         if _boss.boss_bar(frame):
-                            GAME["bar_t"] = now
+                            # 連續兩次（隔 0.5 秒）都看到才算頭目出現；已經在場就直接延續
+                            if GAME.get("bar_hit_t", 0) and now - GAME["bar_hit_t"] < 1.5 \
+                                    or now - GAME.get("bar_t", 0) < 6.0:
+                                GAME["bar_t"] = now
+                            GAME["bar_hit_t"] = now
                     except Exception:
                         pass
                 # 頭目在不在：只看畫面上方的頭目血條（文字辨識的「頭目」「MVP」常常誤讀，只拿來讀名字）
@@ -5030,7 +5151,9 @@ def run(cfg):
                     GAME["char_lv"] = res["char_lv"]
                 if mvp_on and not GAME.get("mvp_logged"):
                     GAME["mvp_logged"] = True
-                    nm_ = res.get("mvp_name") or ""
+                    GAME["boss_wall_t"] = now
+                    # 名字要是最近讀到的（不然會拿到上一隻頭目、甚至上一局的名字）
+                    nm_ = (res.get("mvp_name") or "") if now - res.get("mvp_name_t", 0) < 10 else ""
                     t_ = GAME.get("max_timer", 0)
                     hp_ = GAME.get("last_hp")
                     GAME["boss_hp0"] = hp_
@@ -5048,7 +5171,8 @@ def run(cfg):
                         log(f"頭目戰結束：HP {h1[0]}/{h1[1]}"
                             + (f"（頭目出現時 {h0[0]}/{h0[1]}）" if h0 else ""))
                 bc_ = GAME.get("boss_cur")
-                if mvp_on and bc_ is not None and not bc_.get("name") and res.get("mvp_name"):
+                if mvp_on and bc_ is not None and not bc_.get("name") and res.get("mvp_name") \
+                        and res.get("mvp_name_t", 0) >= GAME.get("boss_wall_t", 0) - 5:
                     bc_["name"] = res["mvp_name"]       # 頭目名字晚一點才讀到 → 補上（報表用）
                 if mcfg.get("boss_capture_games", 3) and (mvp_on or GAME.get("max_timer", 0) >=
                         mcfg.get("boss_capture_from", 830)) and not GAME.get("ending_logged") \
@@ -5140,7 +5264,10 @@ def run(cfg):
                                             not any(t_ - prep_ <= b_ < t_ + 60 for b_ in GAME.get("boss_seen", []))
                                             for t_ in mcfg.get("boss_times", [])):
                         kite_why = "頭目快出現了"
-                    elif mcfg.get("crowd_kite", True) and now - res.get("swarm_t", 0) < 20:
+                    elif mcfg.get("crowd_kite", True) and now - res.get("swarm_t", 0) < 20 and (
+                            GAME.get("kite_why") == "一大群怪物包圍" or not hp_ or not hp_[1]
+                            or hp_[0] < hp_[1] * mcfg.get("swarm_kite_hp", 0.9)):
+                        # 這個提示大約每分鐘就出現一次；血很滿的時候不用躲，照常撿東西
                         kite_why = "一大群怪物包圍"
                     elif mcfg.get("crowd_kite", True) and hp_dropping(now, mcfg) or \
                             (GAME.get("kite_why") == "HP 掉很快" and now < GAME.get("hp_drop_until", 0)):

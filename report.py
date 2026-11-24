@@ -15,14 +15,66 @@ from collections import Counter, defaultdict
 COLS = ["日期", "開始", "結束", "關卡", "結果", "遊戲時間", "倒下時間", "可能原因", "最後HP",
         "最低HP%", "角色等級", "扣血最多的頭目", "該頭目扣血%", "頭目紀錄", "實際花費"]
 
-# 文字辨識常把頭目名字讀成簡體字 → 報表上換回遊戲裡的寫法
-BOSS_TC = {"舞狮": "舞獅", "弹簧兔": "彈簧兔", "白素贞": "白素貞", "机木人": "機木人",
-           "猴桃木": "猴桃木", "邪骸浪人": "邪骸浪人", "元宵童子": "元宵童子", "蛇王": "蛇王"}
+# 已知的頭目（遊戲裡的寫法）。文字辨識常讀成簡體字、少字、後面黏數字（舞狮678、邪浪人、白素真）
+KNOWN_BOSSES = ["舞獅", "猴桃木", "邪骸浪人", "機木人", "元宵童子", "白素貞", "蛇王", "彈簧兔"]
+_S2T = str.maketrans("狮弹贞机", "獅彈貞機")
+NO_NAME = "（沒讀到名字）"
 
 
 def boss_name(nm):
-    nm = (nm or "").strip()
-    return BOSS_TC.get(nm, nm) or "（沒讀到名字）"
+    """頭目名字校正：去掉數字符號、簡體換繁體，跟已知的頭目比，夠像就用已知的寫法"""
+    import difflib
+    import re
+    nm = re.sub(r"[^\u4e00-\u9fff]", "", (nm or "")).translate(_S2T)
+    if not nm:
+        return NO_NAME
+    best, sc = None, 0.0
+    for k in KNOWN_BOSSES:
+        r = difflib.SequenceMatcher(None, nm, k).ratio()
+        if k in nm or (len(nm) >= 2 and nm in k):
+            r = max(r, 0.9)
+        if r > sc:
+            best, sc = k, r
+    return best if sc >= 0.6 else nm
+
+
+def merged_bosses(rec):
+    """同一局、同一隻頭目只算一筆（血條忽隱忽現會被記成很多次「出現」）：
+    出現時間取第一次、出現時的 HP 取第一次、最低 HP 取全部的最低。
+    沒讀到名字的，併到時間最接近（前後 90 秒內）的那一隻"""
+    out = {}
+    unnamed = []
+    for b in rec.get("bosses", []):
+        nm = boss_name(b.get("name"))
+        if nm == NO_NAME:
+            unnamed.append(b)
+            continue
+        m = out.get(nm)
+        if m is None:
+            out[nm] = dict(b, name=nm, last_t=b.get("t") or 0)
+            continue
+        m["last_t"] = max(m["last_t"], b.get("t") or 0)
+        if m.get("pct0") is None:
+            m["pct0"] = b.get("pct0")
+        if b.get("min_pct") is not None:
+            m["min_pct"] = b["min_pct"] if m.get("min_pct") is None else min(m["min_pct"], b["min_pct"])
+    rest = None
+    for b in unnamed:
+        t = b.get("t") or 0
+        near = [m for m in out.values() if m.get("t", 0) - 90 <= t <= m["last_t"] + 90]
+        if near:
+            m = min(near, key=lambda m_: abs((m_.get("t") or 0) - t))
+        else:
+            if rest is None:
+                rest = dict(b, name=NO_NAME, last_t=t)
+                continue
+            m = rest
+        if b.get("min_pct") is not None:
+            m["min_pct"] = b["min_pct"] if m.get("min_pct") is None else min(m["min_pct"], b["min_pct"])
+    res = sorted(out.values(), key=lambda m_: m_.get("t") or 0)
+    if rest is not None and lost_pct(rest):
+        res.append(rest)
+    return res
 
 
 def mmss(sec):
@@ -89,7 +141,7 @@ def lost_pct(b):
 
 def worst_boss(rec):
     best = None
-    for b in rec.get("bosses", []):
+    for b in merged_bosses(rec):
         lp = lost_pct(b)
         if lp is not None and (best is None or lp > best[1]):
             best = (b, lp)
@@ -101,7 +153,7 @@ def csv_row(r):
     wb = worst_boss(r)
     bosses = "；".join(f"{boss_name(b.get('name'))} {mmss(b.get('t'))}"
                       + (f" -{lost_pct(b):.0f}%" if lost_pct(b) is not None else "")
-                      for b in r.get("bosses", []))
+                      for b in merged_bosses(r))
     hp = r.get("last_hp")
     return [time.strftime("%Y-%m-%d", time.localtime(t1)) if t1 else "",
             time.strftime("%H:%M:%S", time.localtime(t0)) if t0 else "",
@@ -152,14 +204,16 @@ def summary(rows, day, boss_times=None):
             L.append(f"  {cause}：{c} 場")
     agg = defaultdict(list)
     for r in rows:
-        for b in r.get("bosses", []):
+        for b in merged_bosses(r):
             lp = lost_pct(b)
             if lp is not None:
-                agg[boss_name(b.get("name"))].append(lp)
+                agg[b["name"]].append(lp)
     if agg:
-        L += ["", "■ 頭目扣血排行（每次出現平均扣掉最大 HP 的 %，越上面越危險）"]
-        for nm, v in sorted(agg.items(), key=lambda kv: -sum(kv[1]) / len(kv[1]))[:8]:
-            L.append(f"  {nm}：平均 {sum(v) / len(v):.0f}%、最多 {max(v):.0f}%（出現 {len(v)} 次）")
+        L += ["", "■ 頭目扣血排行（每場平均扣掉最大 HP 的 %，越上面越危險）"]
+        # 只出現過一次、名字不認得、又沒扣到血的（多半是讀錯的字）不列
+        agg = {nm: v for nm, v in agg.items() if nm in KNOWN_BOSSES or len(v) > 1 or max(v) >= 1}
+        for nm, v in sorted(agg.items(), key=lambda kv: -sum(kv[1]) / len(kv[1]))[:10]:
+            L.append(f"  {nm}：平均 {sum(v) / len(v):.0f}%、最多 {max(v):.0f}%（{len(v)} 場有遇到）")
     if dead:
         top_cause, tc = Counter(r.get("cause") or "不明" for r in dead).most_common(1)[0]
         (a, label), bc = Counter(_bucket(r.get("max_timer") or 0, times) for r in dead).most_common(1)[0]

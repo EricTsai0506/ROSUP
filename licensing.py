@@ -7,6 +7,9 @@
 （Cloudflare Worker），伺服器可以停用序號、改到期日，並用伺服器的日期判斷到期。
 伺服器的回應有簽章（SERVER_PUBLIC_KEY_HEX 驗證），無法偽造。
 連不上伺服器時，最後一次驗證成功後 3 天內照常使用。
+
+存檔（license.state）裡放的是伺服器簽過名的整份回應，每次讀都重新驗簽章、
+並確認是給這組序號的；手動改檔案內容不會被採信。
 """
 import base64
 import datetime as dt
@@ -15,9 +18,9 @@ import json
 import os
 import struct
 import sys
+import threading
 import time
 import urllib.request
-import uuid
 
 PUBLIC_KEY_HEX = "29b2500b132fb7ccf147ac3d464981c57e28a1ce2cec313fe53ce6c9ee4ea839"
 EPOCH = dt.date(2020, 1, 1)
@@ -28,7 +31,11 @@ VERSION = 1
 LICENSE_URL = "https://rosup-license-rice-0162.yowlin0506.workers.dev"
 SERVER_PUBLIC_KEY_HEX = "0849bf22a86622dec45c4e6a537b613a21cc9b4f9eca5b3d5ba61493b7072d17"
 ONLINE_EVERY = 6 * 3600          # 驗證成功後幾秒內不再問伺服器
-GRACE_SEC = 3 * 86400            # 連不上伺服器時，最後一次成功後還能用多久
+GRACE_DAYS = 3                   # 連不上伺服器時，最後一次成功後還能用幾天
+GRACE_SEC = GRACE_DAYS * 86400
+NET_TIMEOUT = 6
+_LOCK = threading.RLock()
+_REG_PATH = r"Software\HangjiHelper"
 APP_VERSION = ""                 # gui 啟動時填入程式版本（給管理頁看）
 
 FROZEN = getattr(sys, "frozen", False)
@@ -132,7 +139,8 @@ def decode_key(key):
 def _load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            st = json.load(f)
+        return st if isinstance(st, dict) else {}
     except Exception:
         return {}
 
@@ -145,16 +153,46 @@ def _save_state(st):
         pass
 
 
+def _reg_get(name):
+    """另外存一份在 Windows 登錄檔（刪掉 license.state 也不會歸零）；讀不到回傳 None"""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as k:
+            v, _ = winreg.QueryValueEx(k, name)
+            return float(v)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _reg_set(name, val):
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as k:
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, repr(float(val)))
+    except OSError:
+        pass
+
+
 def trusted_today():
     """今天的日期；電腦時間比上次看到的還早超過 1 天就不採信"""
     now = time.time()
-    st = _load_state()
-    last = float(st.get("seen", 0))
-    if now < last - 86400:
-        raise ValueError("電腦的日期時間不正確（比上次使用的時間還早），請校正後再開啟")
-    if now > last:
-        st["seen"] = now
-        _save_state(st)
+    with _LOCK:
+        st = _load_state()
+        try:
+            last = float(st.get("seen", 0))
+        except (TypeError, ValueError):
+            last = 0.0
+        last = max(last, _reg_get("seen") or 0.0)
+        if now < last - 86400:
+            raise ValueError("電腦的日期時間不正確（比上次使用的時間還早），請校正後再開啟")
+        if now > last + 60:          # 不用每次都寫檔
+            st["seen"] = now
+            _save_state(st)
+            _reg_set("seen", now)
     return dt.date.fromtimestamp(now)
 
 
@@ -163,58 +201,145 @@ def _key_id(key):
     return hashlib.sha256(_unb32(key)).hexdigest()[:16]
 
 
-def _query_server(key):
-    """問驗證伺服器；回傳伺服器簽過名的結果 dict，連不上或回應不對就丟出例外"""
+_CTX = None
+
+
+def _ssl_ctx():
+    """Windows 憑證 + 程式內附的 certifi 根憑證（有些電腦的 Windows 根憑證不完整，
+    只用 Windows 的會出現 CERTIFICATE_VERIFY_FAILED，一直連不上驗證伺服器）"""
+    global _CTX
+    if _CTX is None:
+        import ssl
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx.load_verify_locations(cafile=certifi.where())
+        except Exception:
+            pass
+        _CTX = ctx
+    return _CTX
+
+
+def _bind(r, kid):
+    return hashlib.sha256(f"{r}|{kid}|{machine_hash().hex()}".encode()).hexdigest()[:32]
+
+
+def _make_nonce(kid):
+    """每次詢問用的隨機碼；後半段綁定這組序號和這台電腦，別人的回應拿來也對不上"""
+    r = os.urandom(8).hex()
+    return r + _bind(r, kid)
+
+
+def _verify_signed(p, s_b64, kid, nonce=None):
+    """驗證伺服器簽過名的回應是真的、而且是給這組序號的；不對就丟出例外"""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    nonce = uuid.uuid4().hex
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(SERVER_PUBLIC_KEY_HEX)).verify(
+        base64.b64decode(s_b64), p.encode())
+    res = json.loads(p)
+    n = str(res.get("nonce", ""))
+    if len(n) != 48 or n[16:] != _bind(n[:16], kid) or (nonce is not None and n != nonce):
+        raise ValueError("驗證伺服器回應不符")
+    dt.date.fromisoformat(res["today"])
+    return res
+
+
+def _query_server(key, kid):
+    """問驗證伺服器；回傳 (結果, 原文, 簽章)，連不上或回應不對就丟出例外"""
+    nonce = _make_nonce(kid)
     body = json.dumps({"key": key, "machine": machine_hash().hex().upper(), "nonce": nonce,
                        "app_ver": APP_VERSION}).encode()
     req = urllib.request.Request(LICENSE_URL.rstrip("/") + "/v1/check", data=body, method="POST",
                                  headers={"content-type": "application/json",
                                           "user-agent": "hangji-helper"})
-    import ssl
-    with urllib.request.urlopen(req, timeout=8, context=ssl.create_default_context()) as r:
+    with urllib.request.urlopen(req, timeout=NET_TIMEOUT, context=_ssl_ctx()) as r:
         resp = json.loads(r.read().decode())
-    p, sig = resp["p"], base64.b64decode(resp["s"])
-    Ed25519PublicKey.from_public_bytes(bytes.fromhex(SERVER_PUBLIC_KEY_HEX)).verify(sig, p.encode())
-    res = json.loads(p)
-    if res.get("nonce") != nonce:
-        raise ValueError("驗證伺服器回應不符")
-    return res
+    p, sig = resp["p"], resp["s"]
+    return _verify_signed(p, sig, kid, nonce), p, sig
+
+
+def _stored(on, kid):
+    """存檔裡那份伺服器回應；沒有、被改過、不是這組序號的 → None"""
+    try:
+        return _verify_signed(on["p"], on["s"], kid)
+    except Exception:
+        return None
 
 
 def online_check(key, force=False):
     """回傳 None（沒設定伺服器）或 {"status": ok/revoked/expired/bad/offline, "msg", "end"}"""
     if not LICENSE_URL:
         return None
-    now = time.time()
-    st = _load_state()
-    kid = _key_id(key)
-    on = st.get("online") if isinstance(st.get("online"), dict) else {}
-    if on.get("kid") != kid:
-        on = {"kid": kid, "first": now}
-    ok_t = float(on.get("ok_t", 0))
-    if not force and on.get("status") == "ok" and 0 <= now - ok_t < ONLINE_EVERY:
-        return {"status": "ok", "msg": "", "end": on.get("end")}
+    with _LOCK:
+        now = time.time()
+        today = dt.date.fromtimestamp(now)
+        st = _load_state()
+        kid = _key_id(key)
+        on = st.get("online") if isinstance(st.get("online"), dict) else {}
+        if on.get("kid") != kid:
+            on = {"kid": kid}
+        # 第一次用這組序號的時間（還沒連上過伺服器時的寬限期從這裡算）：檔案和登錄檔取最早的
+        firsts = [v for v in (on.get("first"), _reg_get("f_" + kid)) if isinstance(v, (int, float)) and v > 0]
+        first = min(firsts + [now])
+        if on.get("first") != first or not firsts:
+            on["first"] = first
+            _reg_set("f_" + kid, first)
+        sg = _stored(on, kid)
+        age = (today - dt.date.fromisoformat(sg["today"])).days if sg else None
+        in_grace = sg is not None and -1 <= age <= GRACE_DAYS
+        try:
+            ok_t = float(on.get("ok_t", 0))
+        except (TypeError, ValueError):
+            ok_t = 0.0
+        if not force and sg and sg.get("status") == "ok" and in_grace and 0 <= now - ok_t < ONLINE_EVERY:
+            return {"status": "ok", "msg": "", "end": sg.get("end")}
     try:
-        res = _query_server(key)
+        res, p, sig = _query_server(key, kid)
     except Exception as e:
-        ref = ok_t or float(on.get("first", now))
-        on.setdefault("first", now)
+        with _LOCK:
+            st = _load_state()
+            st["online"] = on
+            _save_state(st)
+        if sg is not None and sg.get("status") != "ok":      # 上次伺服器就說不行
+            return {"status": sg.get("status"), "msg": sg.get("msg", ""), "end": sg.get("end")}
+        if sg is not None and in_grace:
+            return {"status": "ok", "msg": "", "end": sg.get("end"), "offline": True}
+        if sg is None and 0 <= now - first < GRACE_SEC:      # 還沒連上過：從第一次使用起算
+            return {"status": "ok", "msg": "", "end": None, "offline": True}
+        return {"status": "offline", "end": None,
+                "msg": f"連不上序號驗證伺服器超過 {GRACE_DAYS} 天（{type(e).__name__}），請確認網路後重開程式"}
+    with _LOCK:
+        st = _load_state()
+        on.update(p=p, s=sig)
+        for k_ in ("status", "msg", "end"):      # 舊版沒簽章的欄位不再使用
+            on.pop(k_, None)
+        if res.get("status") == "ok":
+            on["ok_t"] = time.time()
         st["online"] = on
         _save_state(st)
-        if 0 <= now - ref < GRACE_SEC and on.get("status") in (None, "ok"):
-            return {"status": "ok", "msg": "", "end": on.get("end"), "offline": True}
-        if on.get("status") not in (None, "ok"):
-            return {"status": on["status"], "msg": on.get("msg", ""), "end": on.get("end")}
-        return {"status": "offline", "end": on.get("end"),
-                "msg": f"連不上序號驗證伺服器超過 3 天（{type(e).__name__}），請確認網路後重開程式"}
-    on.update(status=res.get("status"), msg=res.get("msg", ""), end=res.get("end"))
-    if res.get("status") == "ok":
-        on["ok_t"] = now
-    st["online"] = on
-    _save_state(st)
     return {"status": res.get("status"), "msg": res.get("msg", ""), "end": res.get("end")}
+
+
+# 掛機中的定期檢查：在背景做，不卡住打怪
+_BG = {"thread": None, "res": None}
+
+
+def check_in_background():
+    """開一條背景執行緒做 check()；回傳上一次背景檢查的結果（還沒有就 None）"""
+    t = _BG["thread"]
+    if t is None or not t.is_alive():
+        def work():
+            try:
+                _BG["res"] = check()
+            except Exception as e:      # 檢查本身出錯不該讓掛機停掉
+                _BG["res"] = {"ok": True, "msg": f"授權檢查出錯：{e}", "end": None, "days_left": 0}
+        t = threading.Thread(target=work, daemon=True)
+        _BG["thread"] = t
+        t.start()
+    return _BG["res"]
+
+
+def background_result():
+    return _BG["res"]
 
 
 # ---------------- 對外 ----------------
