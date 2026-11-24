@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.3"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.4"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -128,29 +128,29 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 # 寶箱能力（順序可在介面「寶箱」分頁調整）
 # (清單上的名稱, 效果, 分類, 卡片標題, 分辨用) ── 分辨用：同名卡片靠效果文字裡有沒有「近戰」區分
 _CHEST_RAW = [
-    ("神", [
-        ("貪婪之神", "+20% 金幣 → +40% 金幣"),
-        ("戰爭之神", "+10% 傷害 · +3% 爆擊 → +20% 傷害 · +5% 爆擊"),
-        ("處刑之神", "+3% 爆擊 · +10% 爆擊傷害 → +5% 爆擊 · +20% 爆擊傷害"),
-        ("力量之神", "+3 STR · +10% 傷害 → +5 STR · +20% 傷害"),
-        ("思想之神", "+3 INT · +10% 傷害 → +5 INT · +20% 傷害"),
-        ("記憶之神", "+3 DEX · +3 詠唱速度 → +5 DEX · +5 詠唱速度"),
-        ("堡壘之神", "+3 護甲 · +10% 最大 HP → +5 護甲 · +20% 最大 HP"),
-        ("疾風之神", "+10% 速度 · +3% 迴避 → +20% 速度 · +5% 迴避"),
-        ("生命之神", "每 5 秒 +5 HP · +10% 最大 HP → 每 5 秒 +10 HP · +20% 最大 HP"),
-        ("智慧之神", "+20% 經驗值 → +40% 經驗值"),
-        ("束縛之神", "+10% 範圍 · +10% 傷害 → +20% 範圍 · +20% 傷害"),
-        ("詭計之神", "+3% 迴避 · +3% 爆擊 → +5% 迴避 · +5% 爆擊"),
-        ("折磨之神", "+10% 毒、燃燒與流血傷害 · +10% 傷害 → +20% 毒、燃燒與流血傷害 · +20% 傷害"),
+    ("神器", [
+        ("貪婪神器", "+20% 金幣 → +40% 金幣"),
+        ("戰爭神器", "+10% 傷害 · +3% 爆擊 → +20% 傷害 · +5% 爆擊"),
+        ("處刑神器", "+3% 爆擊 · +10% 爆擊傷害 → +5% 爆擊 · +20% 爆擊傷害"),
+        ("力量神器", "+3 STR · +10% 傷害 → +5 STR · +20% 傷害"),
+        ("思想神器", "+3 INT · +10% 傷害 → +5 INT · +20% 傷害"),
+        ("記憶神器", "+3 DEX · +3 詠唱速度 → +5 DEX · +5 詠唱速度"),
+        ("堡壘神器", "+3 護甲 · +10% 最大 HP → +5 護甲 · +20% 最大 HP"),
+        ("疾風神器", "+10% 速度 · +3% 迴避 → +20% 速度 · +5% 迴避"),
+        ("生命神器", "每 5 秒 +5 HP · +10% 最大 HP → 每 5 秒 +10 HP · +20% 最大 HP"),
+        ("智慧神器", "+20% 經驗值 → +40% 經驗值"),
+        ("束縛神器", "+10% 範圍 · +10% 傷害 → +20% 範圍 · +20% 傷害"),
+        ("詭計神器", "+3% 迴避 · +3% 爆擊 → +5% 迴避 · +5% 爆擊"),
+        ("折磨神器", "+10% 毒、燃燒與流血傷害 · +10% 傷害 → +20% 毒、燃燒與流血傷害 · +20% 傷害"),
     ]),
     ("藥水", [
-        ("恢復藥水", "每 5 秒 +1 HP → 每 5 秒 +5 HP"),
+        ("回復藥水", "每 5 秒 +1 HP → 每 5 秒 +5 HP"),
         ("冷卻藥水", "急速 +6 → 急速 +15"),
         ("生命藥水", "+10% 最大 HP → +20% 最大 HP"),
         ("護甲藥水", "+1 護甲 → +5 護甲"),
-        ("廣域藥水（範圍）", "+18% 範圍 → +40% 範圍"),
+        ("範圍藥水", "+18% 範圍 → +40% 範圍"),
         ("採集藥水", "拾取範圍 +1 公尺 → 拾取範圍 +5 公尺"),
-        ("貪欲藥水", "+10% Zeny → +20% Zeny"),
+        ("貪婪藥水", "+10% Zeny → +20% Zeny"),
         ("速度藥水", "+10% 移動速度 → +20% 移動速度"),
         ("詠唱藥水", "+6 詠唱速度 → +15 詠唱速度"),
         ("廣域藥水（近戰）", "+10% 近戰距離 → +20% 近戰距離（只限近戰流派）"),
@@ -160,25 +160,26 @@ _CHEST_RAW = [
         ("爆擊秘藥", "+1% 爆擊 → +5% 爆擊"),
         ("傷害秘藥", "+10% 傷害 → +20% 傷害"),
         ("生命秘藥", "+15 最大 HP → +30 最大 HP"),
-        ("爆擊傷害藥劑", "+18% 爆擊傷害 → +40% 爆擊傷害"),
+        ("爆擊傷害秘藥", "+18% 爆擊傷害 → +40% 爆擊傷害"),
         ("驚奇秘藥", "+10% 尋寶率 → +20% 尋寶率"),
+        ("尋寶藥水", "+10% 尋寶率 → +20% 尋寶率"),
         ("持續傷害藥劑", "中毒、燃燒與出血傷害 +10% → +20%（僅在已造成中毒、燃燒或出血後）"),
         ("迴避秘藥", "+1% 迴避（Flee）→ +5% 迴避"),
         ("詠唱秘藥", "+6 詠唱速度 → +15 詠唱速度"),
-        ("廣域秘藥", "+10% 範圍 → +20% 範圍"),
+        ("範圍秘藥", "+10% 範圍 → +20% 範圍"),
         ("護甲秘藥", "-1% 承受傷害 → -5% 承受傷害"),
     ]),
     ("祝福", [
         ("傷害祝福", "+18% 傷害 → +40% 傷害"),
-        ("恢復祝福", "每 5 秒 +1% 最大 HP → 每 5 秒 +5% 最大 HP"),
+        ("回復祝福", "每 5 秒 +1% 最大 HP → 每 5 秒 +5% 最大 HP"),
         ("冷卻祝福", "急速 +4 → 急速 +10"),
         ("吸血祝福", "+0.1% 吸血 → +0.5% 吸血"),
-        ("雙倍投擲祝福", "+1% 雙倍投擲機率 → +5% 雙倍投擲機率"),
-        ("豐收祝福", "+10% Zeny 與 +10% 尋寶率 → +20% Zeny 與 +20% 尋寶率"),
+        ("雙重詠唱祝福", "+1% 雙重詠唱 → +5% 雙重詠唱"),
+        ("豐饒祝福", "+10% Zeny 與 +10% 尋寶率 → +20% Zeny 與 +20% 尋寶率"),
         ("詠唱祝福", "+4 詠唱速度 → +10 詠唱速度"),
-        ("廣域祝福（範圍）", "+10% 範圍 → +20% 範圍"),
+        ("範圍祝福", "+10% 範圍 → +20% 範圍"),
         ("廣域祝福（近戰）", "+10% 近戰距離 → +20% 近戰距離（只限近戰流派）"),
-        ("睿智祝福", "+10% EXP → +20% EXP"),
+        ("智慧祝福", "+10% 經驗值 → +20% 經驗值"),
     ]),
     ("神祇（技能）", [
         ("火箭術", "+15% 傷害 · 火球術：每個投射物爆成火球，對周圍造成 30% 傷害（1.5 公尺，隨範圍成長）"),
@@ -201,20 +202,27 @@ _CHEST_RAW = [
     ]),
 ]
 CHEST_ITEMS = [(name, eff) for _, lst in _CHEST_RAW for name, eff in lst]
+# 2026-11-24 遊戲改版：「X之神」改叫「X神器」；其他依卡片上實際的字更正
+RENAMED_18 = {'貪婪之神': '貪婪神器', '戰爭之神': '戰爭神器', '處刑之神': '處刑神器', '力量之神': '力量神器', '思想之神': '思想神器', '記憶之神': '記憶神器', '堡壘之神': '堡壘神器', '疾風之神': '疾風神器', '生命之神': '生命神器', '智慧之神': '智慧神器', '束縛之神': '束縛神器', '詭計之神': '詭計神器', '折磨之神': '折磨神器', '恢復藥水': '回復藥水', '恢復祝福': '回復祝福', '睿智祝福': '智慧祝福', '豐收祝福': '豐饒祝福', '廣域藥水（範圍）': '範圍藥水', '廣域秘藥': '範圍秘藥', '廣域祝福（範圍）': '範圍祝福', '貪欲藥水': '貪婪藥水', '爆擊傷害藥劑': '爆擊傷害秘藥', '雙倍投擲祝福': '雙重詠唱祝福'}
+# 舊名稱也認得（卡片還是舊字的時候）
+CHEST_ALIASES = {new: [old] for old, new in RENAMED_18.items()}
+# 文字辨識常把「範圍」的「範」漏掉、「圍」讀成「圜／圖」
+for _k in ("祝福", "秘藥", "藥水"):
+    CHEST_ALIASES.setdefault("範圍" + _k, []).extend(["圍" + _k, "圜" + _k, "圖" + _k])
 RENAMED_17 = {"爆擊靈藥": "爆擊秘藥", "傷害靈藥": "傷害秘藥", "生命靈藥": "生命秘藥", "驚奇靈藥": "驚奇秘藥",
               "詠唱靈藥": "詠唱秘藥", "廣域靈藥": "廣域秘藥", "護甲靈藥": "護甲秘藥"}
 # 卡片標題沒讀到（讀成下面的說明）時，用說明裡的關鍵字認出是哪個寶箱
 CHEST_KEYWORDS = [("火球術", "火箭術"), ("累積冰霜", "冰箭術"), ("連鎖閃電", "雷擊術"),
                   ("吸魂術", "聖靈召喚"), ("念力連擊", "心靈爆破"), ("火柱", "火焰之壁"),
                   ("冰凍爆發", "冰凍術"), ("火之獵殺", "火狩"), ("怒雷強擊", "雷爆術"),
-                  ("拾取範圍", "採集藥水"), ("吸血", "吸血祝福"), ("雙倍投擲", "雙倍投擲祝福"),
-                  ("經驗值", "智慧之神"), ("移動速度", "速度藥水")]
+                  ("拾取範圍", "採集藥水"), ("吸血", "吸血祝福"), ("雙重詠唱", "雙重詠唱祝福"),
+                  ("移動速度", "速度藥水")]
 CHEST_CATEGORY = {name: cat for cat, lst in _CHEST_RAW for name, _ in lst}
 
 
 # 預設排在最前面的寶箱（依序）
-CHEST_TOP = ["思想之神", "處刑之神", "戰爭之神", "火箭術", "冰箭術", "雷擊術", "採集藥水", "冷卻祝福", "冷卻藥水",
-             "傷害祝福", "傷害藥水", "傷害秘藥", "爆擊秘藥", "爆擊傷害藥劑",
+CHEST_TOP = ["思想神器", "處刑神器", "戰爭神器", "火箭術", "冰箭術", "雷擊術", "採集藥水", "冷卻祝福", "冷卻藥水",
+             "傷害祝福", "傷害藥水", "傷害秘藥", "爆擊秘藥", "爆擊傷害秘藥",
              "詠唱藥水", "詠唱秘藥", "詠唱祝福"]
 
 
@@ -240,7 +248,7 @@ def chest_variant(name):
 #  預設設定
 # =====================================================================
 DEFAULT_CONFIG = {
-    "config_version": 17,
+    "config_version": 18,
     "window_title": "",
     "dry_run": True,
     "debug_snapshots": True,
@@ -475,10 +483,22 @@ def migrate_config(cfg, ver=None):
         ren = RENAMED_17
         for key in ("priority", "avoid", "priority_late"):
             cfg["chest"][key] = [ren.get(n, n) for n in cfg["chest"].get(key, []) or []]
+    if ver < 18:  # 遊戲把「X之神」改叫「X神器」，另外幾個名稱照卡片上的字更正
+        for key in ("priority", "avoid", "priority_late"):
+            seen_, out_ = set(), []
+            for n in cfg["chest"].get(key, []) or []:
+                n = RENAMED_18.get(n, n)
+                if n not in seen_:
+                    seen_.add(n)
+                    out_.append(n)
+            cfg["chest"][key] = out_
+        pr_ = cfg["chest"].get("priority", [])
+        if "尋寶藥水" not in pr_ and "驚奇秘藥" in pr_:      # 新項目放在效果一樣的「驚奇秘藥」後面
+            pr_.insert(pr_.index("驚奇秘藥") + 1, "尋寶藥水")
     late = [n for n in (cfg["chest"].get("priority_late") or []) if n]
     if late:    # 後期排名缺的項目（新增的道具）接在最後面
         cfg["chest"]["priority_late"] = late + [n for n in cfg["chest"].get("priority", []) if n not in late]
-    cfg["config_version"] = 17
+    cfg["config_version"] = 18
     return cfg
 
 
@@ -1339,6 +1359,57 @@ def _reroll_button(cl, rank, spacing_hint=None, want=0, label="重抽"):
             "w": first["w"], "h": first["h"], "cx": cx, "cy": first["cy"], "estimated": True}
 
 
+def _add_cards_from_tags(cards, items, frame_h, rank):
+    """按鈕變灰（次數用完）時常常讀不到 → 用卡片上方的稀有度標籤（普通／優良／稀有…）補出漏掉的卡。
+    補出來的卡按鈕位置用同一排讀到的按鈕推算；整個畫面一個按鈕都沒讀到時標成 unsafe（不按重抽／放逐／專注）"""
+    tags = [i for i in items if tag_rank(i["n"]) is not None and not _is_button(i)]
+    if not tags:
+        return
+    near = frame_h * 0.08
+    real = [c for c in cards if not c.get("synthetic")]
+    # 讀到的按鈕相對於自己那張卡標籤的位置（每種按鈕各一個）
+    offs = {}
+    for c in real:
+        tg = min(tags, key=lambda t: abs(t["cx"] - c["cx"]), default=None)
+        if tg is None or abs(tg["cx"] - c["cx"]) > frame_h * 0.12:
+            continue
+        for key in ("reroll", "focus", "banish"):
+            b = c[key]
+            if b and not b.get("estimated"):
+                offs.setdefault(key, (b["cx"] - tg["cx"], b["cy"] - tg["cy"], b["w"], b["h"]))
+    row_y = sorted(c["cy"] for c in real)[len(real) // 2] if real else None
+    for tg in tags:
+        if any(abs(tg["cx"] - c["cx"]) < near for c in cards):
+            continue
+        if row_y is not None and tg["cy"] > row_y:
+            continue
+        cy = row_y if row_y is not None else tg["cy"] + frame_h * 0.483
+        card = {"cx": tg["cx"], "cy": cy, "synthetic": True}
+        sp = None
+        for (k1, r1), (k2, r2) in (((a, rank_), (b, rank2)) for a, rank_ in (("reroll", 0), ("focus", 1), ("banish", 2))
+                                   for b, rank2 in (("reroll", 0), ("focus", 1), ("banish", 2)) if rank2 > rank_):
+            if k1 in offs and k2 in offs:
+                sp = (offs[k2][0] - offs[k1][0]) / (r2 - r1)
+        unsafe = not offs
+        for key, r in (("reroll", 0), ("focus", 1), ("banish", 2)):
+            if key in offs:
+                dx, dy, w, h = offs[key]
+            elif offs:
+                k0, r0 = next((k, rr) for k, rr in (("reroll", 0), ("focus", 1), ("banish", 2)) if k in offs)
+                spc = sp or frame_h * 0.071
+                dx, dy, w, h = offs[k0][0] + (r - r0) * spc, offs[k0][1], offs[k0][2], offs[k0][3]
+                if sp is None:
+                    unsafe = True
+            else:
+                dx, dy, w, h = (r - 1) * frame_h * 0.071, frame_h * 0.483, frame_h * 0.045, frame_h * 0.03
+            bx, by = tg["cx"] + dx, tg["cy"] + dy
+            card[key] = {"text": ("重抽", "專注", "放逐")[r], "n": ("重抽", "专注", "放逐")[r],
+                         "x": bx - w / 2, "y": by - h / 2, "w": w, "h": h, "cx": bx, "cy": by,
+                         "estimated": True, "unsafe": unsafe}
+        cards.append(card)
+    cards.sort(key=lambda c: (round(c["cy"] / 40), c["cx"]))
+
+
 def find_cards(items, frame_h, frame=None, ox=0, oy=0):
     """以每張卡片下方那排按鈕（重抽／專注／放逐）為基準，找出卡片標題與稀有度。
     卡片直排（手機）或橫排（電腦）都適用。"""
@@ -1366,8 +1437,6 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
                 break
         else:
             clusters.append([b])
-    if not clusters:
-        return []
     # 按鈕間距（重抽→專注→放逐 每一格的距離），取所有卡片的中位數
     gaps = []
     for cl in clusters:
@@ -1385,6 +1454,10 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
                       "banish": _banish_button(cl, rank, spacing_hint),
                       "reroll": _reroll_button(cl, rank, spacing_hint),
                       "focus": _reroll_button(cl, rank, spacing_hint, 1, "專注")})
+
+    _add_cards_from_tags(cards, items, frame_h, rank)
+    if not cards:
+        return []
 
     # 每張卡左右能涵蓋的範圍：同一排相鄰卡片距離的一半
     for c in cards:
@@ -1424,7 +1497,8 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
         def subtitle_like(i):
             t_ = i["text"].strip()
             return t_.startswith(("(", "（", "《")) or bool(re.search(r"\d+(\.\d+)?\s*[sS秒]\s*$", t_)) \
-                or bool(re.search(r"[:：]\s*\d", t_)) or "唱" in t_ or "·" in t_ and len(t_) > 8
+                or bool(re.search(r"[:：]\s*\d", t_)) or bool(re.search(r"唱\s*\d", t_)) \
+                or "·" in t_ and len(t_) > 8
         known = [i for i in texts if any(match(i["text"], k) for k in KNOWN_SKILLS)]
         if tags:
             t = tags[0]
@@ -1459,7 +1533,8 @@ def find_cards(items, frame_h, frame=None, ox=0, oy=0):
 
 def chest_match(card, name):
     """卡片是不是清單上的這一項；同名的（廣域藥水／廣域祝福）再看效果有沒有「近戰」"""
-    if not match(card["title"]["text"], chest_title(name)):
+    if not match(card["title"]["text"], chest_title(name)) and not any(
+            match(card["title"]["text"], chest_title(a)) for a in CHEST_ALIASES.get(name, [])):
         return False
     v = chest_variant(name)
     if v is None:
@@ -1471,9 +1546,13 @@ def chest_match(card, name):
 
 def chest_identify(c):
     """這張寶箱卡是清單上的哪一項（全部寶箱裡）；標題沒讀到時看說明的關鍵字。認不出來回傳 None"""
-    for name, _ in CHEST_ITEMS:
-        if chest_match(c, name):
-            return name
+    cands = [name for name, _ in CHEST_ITEMS if chest_match(c, name)]
+    if cands:
+        # 「爆擊傷害秘藥」同時像「傷害秘藥」「爆擊秘藥」→ 標題裡完整出現、名稱最長的那個
+        t_ = norm(c["title"]["text"])
+        full = [n for n in cands if norm(chest_title(n)) in t_
+                or any(norm(chest_title(a)) in t_ for a in CHEST_ALIASES.get(n, []))]
+        return max(full, key=lambda n: len(chest_title(n))) if full else cands[0]
     txt = norm(" ".join([c["title"]["text"]] + [i["text"] for i in c.get("lines", [])]))
     for kw, name in CHEST_KEYWORDS:
         if norm(kw) in txt:
@@ -2782,14 +2861,15 @@ def handle_levelup(cards, items, sec, inp, st):
             if GAME["banish_fail"] >= 2:
                 GAME["banish_off"] = True
                 log("  放逐好像沒有作用（次數可能用完了），這局不再放逐")
-        dis_ = None if GAME["banish_off"] else button_really_disabled(st, four[0]["banish"], "skill")
-        if dis_ is None and not GAME["banish_off"]:
+        unsafe_ = bool(four[0]["banish"].get("unsafe"))     # 按鈕沒讀到、位置猜不準 → 這次先不放逐
+        dis_ = None if GAME["banish_off"] or unsafe_ else button_really_disabled(st, four[0]["banish"], "skill")
+        if dis_ is None and not GAME["banish_off"] and not unsafe_:
             time.sleep(0.6)
             return True         # 按鈕暗暗的：等動畫播完再看一次
         if dis_:
             GAME["banish_off"] = True
             log("  放逐按鈕變灰色了（次數用完），這局不再放逐")
-        if not GAME["banish_off"]:
+        if not GAME["banish_off"] and not unsafe_:
             b = four[0]["banish"]
             pos = inp.click_item(b, "放逐") or (round(b["cx"]), round(b["cy"]))
             if four[0]["always"]:
@@ -3949,7 +4029,7 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     br = int(sec.get("banish_rank", 0) or 0)
     if br > 0 and not GAME.get("chest_banish_off") and st.get("card_banishes", 0) < 3:
         # 只放逐「認得出來」的寶箱（標題讀錯、認不出是什麼的不放逐，免得放逐到好東西）
-        bad = [c for c in cards if c is not best and c.get("item") and
+        bad = [c for c in cards if c is not best and c.get("item") and not c["banish"].get("unsafe") and
                (rk(c) > br or c.get("item") not in sec.get("priority", []))]
         if bad:
             if not skill_banish_done(lv_sec or {}):
@@ -3977,7 +4057,7 @@ def chest_rank_actions(cards, best, sec, inp, st, lv_sec=None):
     if rr > 0 and not GAME.get("chest_reroll_off") \
             and st.get("card_rerolls", 0) < int(sec.get("reroll_limit", 6) or 0):
         # 要拿的那張已經在前 N 名內（而且不是會佔欄位的爛新道具）→ 直接拿，不浪費重抽
-        bad = [c for c in cards if bad_for(c, rr)] if bad_for(best, rr) else []
+        bad = [c for c in cards if bad_for(c, rr) and not c["reroll"].get("unsafe")] if bad_for(best, rr) else []
         dis_r = button_really_disabled(st, max(bad, key=rk)["reroll"], "chest_r") if bad else False
         if dis_r is None:
             time.sleep(0.6)
