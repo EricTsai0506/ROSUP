@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.8"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.9"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -523,6 +523,59 @@ def load_config():
 _logf = None
 LOG_HOOKS = []   # 視窗介面用：收到每一行紀錄
 CONTROL = {"stop": False, "toggle_pause": False, "paused": False, "status": ""}
+LIVE = {"cfg": None}
+LIVE_SKIP = ("browser", "dry_run", "window_title", "config_version")   # 這些要停止再開始才會換
+
+
+def _merge_live(dst, src):
+    """把新設定寫進執行中的設定（原地更新，程式各處拿著的是同一份）。回傳有沒有改到"""
+    changed = False
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            changed = _merge_live(dst[k], v) or changed
+        elif dst.get(k, None) != v or k not in dst:
+            dst[k] = v
+            changed = True
+    return changed
+
+
+def live_update(new):
+    """掛機中在視窗改了選項 → 套用到執行中的程式"""
+    cfg = LIVE.get("cfg")
+    if cfg is None:
+        return False
+    old_town = (cfg["town"].get("mode"), cfg["town"].get("stage"))
+    old_perf = cfg.get("perf", {}).get("level")
+    restart = [k for k in LIVE_SKIP if k in new and new[k] != cfg.get(k) and k != "config_version"]
+    new = json.loads(json.dumps(new))
+    nt = new.get("town", {})
+    want = (nt.get("mode", old_town[0]), nt.get("stage", old_town[1]))
+    LIVE.pop("pending_town", None)
+    if want != old_town and GAME.get("phase") == "battle":
+        # 這一場還在打：關卡等打完回城鎮再換（不然小地圖、頭目設定會用錯關卡）
+        LIVE["pending_town"] = want
+        nt["mode"], nt["stage"] = old_town
+        if nt["stage"] is None:
+            nt.pop("stage")
+        log("選項有更動：這一場打完後改打" + (f"遠征「{want[1]}」" if want[0] == "expedition" else "節慶主持人"))
+    if not _merge_live(cfg, {k: v for k, v in new.items() if k not in LIVE_SKIP}) and not restart:
+        return False
+    log("選項有更動 → 已套用（不用停止再開始）")
+    tc = cfg["town"]
+    if (tc.get("mode"), tc.get("stage")) != old_town:
+        GAME["exp_fallback_until"] = 0
+        EXP.clear()
+        log("  下一場改打：" + (f"遠征「{tc.get('stage')}」" if tc.get("mode") == "expedition" else "節慶主持人"))
+    lvl = cfg.get("perf", {}).get("level")
+    if lvl != old_perf:
+        try:
+            apply_perf(lvl)
+            log(f"  效能改成：{PERF['label']}")
+        except Exception:
+            pass
+    if restart:
+        log("  瀏覽器／測試模式這幾項要按「停止」再「開始」才會換")
+    return True
 
 
 def log(*a):
@@ -3269,6 +3322,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
     H, W = frame.shape[:2]
     ox, oy = rect[0], rect[1]
     items = ocr(frame, ox, oy)
+    apply_pending_town(tc)
     mode = town_mode(tc)
     set_route_mode(mode)
     if mode == "expedition":
@@ -4374,6 +4428,18 @@ def set_difficulty(frame, items, rect, cfg, inp):
     return True
 
 
+def apply_pending_town(tc):
+    """掛機中改了關卡、當時還在戰鬥 → 回到城鎮時才換"""
+    pt = LIVE.pop("pending_town", None)
+    if pt:
+        tc["mode"] = pt[0]
+        if pt[1]:
+            tc["stage"] = pt[1]
+        GAME["exp_fallback_until"] = 0
+        EXP.clear()
+        log("下一場改打：" + (f"遠征「{tc.get('stage')}」" if pt[0] == "expedition" else "節慶主持人"))
+
+
 def town_mode(tc):
     """這一場要刷什麼：設定是遠征，但遠征連續失敗 → 先改刷節慶主持人一陣子，不要卡著"""
     mode = tc.get("mode", "festival")
@@ -4729,6 +4795,7 @@ def run(cfg):
     global MOVER
     dry = cfg["dry_run"]
     CONTROL["dry"] = dry
+    LIVE["cfg"] = cfg
     try:
         import licensing
         _lic = licensing.check()

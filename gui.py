@@ -94,8 +94,47 @@ class App:
         return True
 
     def save_cfg(self, quiet=False):
-        if not self.reload_if_edited():
+        if not self.collect_cfg():
             return
+        c = self.cfg
+        try:
+            with open(rb.CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(c, f, ensure_ascii=False, indent=2)
+            self.cfg_mtime = self._cfg_mtime()
+            if not quiet:
+                self.add_log("設定已儲存")
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"儲存設定失敗：\n{e}")
+        self.push_live()
+
+    def push_live(self):
+        """掛機中改了選項 → 直接套用到執行中的程式，不用停止再開始"""
+        sig = json.dumps(self.cfg, sort_keys=True, ensure_ascii=False)
+        if sig == getattr(self, "_live_sig", None):
+            return
+        self._live_sig = sig
+        if self.thread is not None and self.thread.is_alive():
+            try:
+                rb.live_update(json.loads(sig))
+            except Exception as e:
+                self.add_log(f"設定套用失敗：{e}")
+
+    def live_sync(self):
+        """掛機中每 2 秒看一次畫面上的選項有沒有改，有改就存檔並套用"""
+        if time.time() < getattr(self, "_live_next", 0):
+            return
+        self._live_next = time.time() + 2
+        try:
+            before = json.dumps(self.cfg, sort_keys=True, ensure_ascii=False)
+            if self.collect_cfg() and json.dumps(self.cfg, sort_keys=True, ensure_ascii=False) != before:
+                self.save_cfg(quiet=True)
+        except Exception:
+            pass
+
+    def collect_cfg(self):
+        """把畫面上的選項收進 self.cfg（不存檔）"""
+        if not self.reload_if_edited():
+            return False
         c = self.cfg
         c["window_title"] = self.v_title.get().strip()
         c.setdefault("browser", {})["mode"] = self.v_mode.get() or "cdp"
@@ -175,14 +214,7 @@ class App:
         for k in ("afk", "login", "charselect"):
             c.setdefault(k, dict(rb.DEFAULT_CONFIG[k]))["enabled"] = self.v_login.get()
         c["charselect"]["slot"] = int(self.v_slot.get())
-        try:
-            with open(rb.CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(c, f, ensure_ascii=False, indent=2)
-            self.cfg_mtime = self._cfg_mtime()
-            if not quiet:
-                self.add_log("設定已儲存")
-        except Exception as e:
-            messagebox.showerror(APP_TITLE, f"儲存設定失敗：\n{e}")
+        return True
 
     # ---------------- 介面 ----------------
     def build(self):
@@ -612,6 +644,7 @@ class App:
         running = self.thread is not None and self.thread.is_alive()
         if running:
             self.was_running = True
+            self.live_sync()
             if rb.CONTROL.get("paused"):
                 self.status.config(text="● 暫停中", foreground="#c08000")
                 self.b_pause.config(text="▶ 繼續")
@@ -730,6 +763,7 @@ class App:
             return
         self.save_cfg(quiet=True)
         cfg = json.loads(json.dumps(self.cfg))
+        self._live_sig = json.dumps(self.cfg, sort_keys=True, ensure_ascii=False)
         rb.CONTROL.update(stop=False, toggle_pause=False, paused=False)
         self.b_start.config(state="disabled")
         self.b_pause.config(state="normal")
