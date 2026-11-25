@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.7"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.8"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -3232,6 +3232,24 @@ def clear_route():
             pass
 
 
+CAPTAIN_FROM_HOST = (-355.0, 260.0)     # 遠征隊長在節慶主持人的左下方（1264 寬、沒拉遠視野時的像素）
+CAPTAIN_FROM_SPAWN = (134.0, 123.0)     # 遠征隊長離出生點的大概位置（同上）
+TOWN_ZOOM_SCALE = 0.73                  # 城鎮拉遠視野後，畫面大概縮成這個比例
+
+
+def town_npc_name(tc):
+    return "遠征隊長" if town_mode(tc) == "expedition" else tc.get("npc_name", "節慶主持人")
+
+
+def captain_like(n):
+    """這幾個字像不像「遠征隊長」：名字很小，「隊」「遠」常被讀錯（遠征际長、蔬征除长、遠征長…）"""
+    if any(k in n for k in ("持人", "主持", "商人", "匠")):
+        return False
+    if any(k in n for k in ("远征", "队长", "征队", "隧长", "际长")):
+        return True
+    return 3 <= len(n) <= 5 and "征" in n[:3] and n.endswith("长")
+
+
 def town_reset(tst):
     """回到出生點（剛從大廳進城）：重設地圖座標"""
     for k in ("prev", "target", "route_on", "route_checked", "route_off", "npc_world", "npc_first",
@@ -3239,7 +3257,7 @@ def town_reset(tst):
               "blocked", "hist", "detour_until", "route_i", "route_stuck", "key_dir",
               "path_w", "plan_t", "plan_tgt", "move_since", "last_dir",
               "spawn_moved", "guess_used", "spiral_t0",
-              "zoom_done", "zoomed", "click_next", "click_hold_until", "label_h", "click_n", "click_fail", "click_d", "click_logged", "click_t", "click_gave_up"):
+              "zoom_done", "zoomed", "cap_t0", "cap_guess", "cap_snap", "host_w", "click_next", "click_hold_until", "label_h", "click_n", "click_fail", "click_d", "click_logged", "click_t", "click_gave_up"):
         tst.pop(k, None)
     tst.update(world=(0.0, 0.0), trail=[(0.0, 0.0)], fresh=True, stuck_total=0, stuck_n=0)
 
@@ -3255,7 +3273,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
     set_route_mode(mode)
     if mode == "expedition":
         kw, name = norm("隊長"), "遠征隊長"
-        kws = [norm(k) for k in ("隊長", "遠征", "征隊", "長交", "隧長", "际長")]
+        kws = [norm(k) for k in ("隊長", "遠征", "征隊", "長交", "隧長", "际長", "征长")]
     else:
         kw, name = norm(tc["npc_keyword"]), tc.get("npc_name", "節慶主持人")
         kws = [kw, norm("持人")]
@@ -3343,7 +3361,9 @@ def town_ocr(frame, rect, cfg, inp, tst):
     hints = [j for j in items if j["n"] in ("空格", "空白") or "space" in j["n"]]
 
     def is_prompt(i):
-        if not (kw in i["n"] and i["cy"] - oy > H * 0.55 and abs(i["cx"] - ox - W / 2) < W * 0.3):
+        named = kw in i["n"] or (mode == "expedition" and "长" in i["n"] and not any(
+            k in i["n"] for k in ("持人", "主持", "商人", "克")))
+        if not (named and i["cy"] - oy > H * 0.55 and abs(i["cx"] - ox - W / 2) < W * 0.3):
             return False
         if any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白", "space")):
             return True
@@ -3362,7 +3382,12 @@ def town_ocr(frame, rect, cfg, inp, tst):
             y1 = int(min(H, sp["y"] - oy + sp["h"] + 20))
             zt = " ".join(i["n"] for i in ocr(frame[y0:y1, x0:x1], ox + x0, oy + y0, scale=1.5,
                                               min_score=0.3))
-            if any(k in zt for k in kws) and not (mode == "expedition" and "持人" in zt):
+            if mode == "expedition":
+                # 「與隊長交談」的「隊」常讀錯：有「長」、又不是主持人／商人／鐵匠就算
+                if "持人" not in zt and "主持" not in zt and "商人" not in zt and "克" not in zt \
+                        and (any(k in zt for k in kws) or "长" in zt):
+                    prompt = [sp]
+            elif any(k in zt for k in kws):
                 prompt = [sp]
     if prompt and time.time() - tst.get("prompt_pending", 0) > 3:
         # 第一次看到提示：先停下來，馬上再讀一次確認還是主持人（旁邊的隊長等 NPC 也會跳提示）
@@ -3390,22 +3415,41 @@ def town_ocr(frame, rect, cfg, inp, tst):
 
     # 主持人頭上的名字：字數跟名字差不多（聊天訊息、提示句子那種長句不算）
     def label_ok(i):
-        return any(k in i["n"] for k in kws) and not is_prompt(i) \
+        hit = captain_like(i["n"]) if mode == "expedition" else any(k in i["n"] for k in kws)
+        # 聊天框（左下）和最上面的按鈕列不是 NPC 名字
+        rx, ry = (i["cx"] - ox) / W, (i["cy"] - oy) / H
+        if ry < 0.08 or (ry > 0.84 and rx < 0.42):
+            return False
+        return hit and not is_prompt(i) \
             and len(i["n"]) <= len(norm(name)) + 3 \
             and not any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白"))
     labels = [i for i in items if label_ok(i)]
+    if mode == "expedition":
+        # 順便記住節慶主持人在哪：隊長就在他左下方，名字讀不到時可以照這個位置走過去
+        hl = next((i for i in items if ("持人" in i["n"] or "主持" in i["n"]) and len(i["n"]) <= 7
+                   and not any(norm(k) in i["n"] for k in ("交談", "對話", "空格", "空白"))
+                   and (i["cy"] - oy) / H < 0.84), None)
+        if hl is not None:
+            wx0, wy0 = tst.get("world", (0.0, 0.0))
+            tst["host_w"] = (wx0 + hl["cx"] - ox - W / 2,
+                             wy0 + hl["cy"] - oy + tc["npc_body_offset"] - (H / 2 + tc.get("feet_offset", 30)))
     if not labels and time.time() >= tst.get("zoom_next", 0):
         # NPC 頭上的名字很小，讀不到時放大畫面中間再讀一次（每 2 秒最多一次）
         tst["zoom_next"] = time.time() + 2
         x0, y0, x1, y1 = int(W * .1), int(H * .08), int(W * .9), int(H * .78)
         labels = [i for i in ocr(frame[y0:y1, x0:x1], ox + x0, oy + y0, scale=1.5, min_score=0.3)
                   if label_ok(i)]
+        if not labels and mode == "expedition":
+            # 隊長的名字比較難讀，再放大一點讀一次
+            labels = [i for i in ocr(frame[y0:y1, x0:x1], ox + x0, oy + y0, scale=2.5, min_score=0.3)
+                      if label_ok(i)]
     if labels:
         lc = (W / 2, H / 2)
         lab = min(labels, key=lambda i: math.hypot(i["cx"] - ox - lc[0], i["cy"] - oy - lc[1]))
         tst["target"] = (lab["cx"] - ox, lab["cy"] - oy + tc["npc_body_offset"])
         tst["label_h"] = lab["h"]
         tst["last_seen"] = time.time()
+        tst.pop("cap_t0", None)
         # 主持人在地圖上的位置（以出生點為原點）
         flc = (W / 2, H / 2 + tc.get("feet_offset", 30))
         wx_, wy_ = tst.get("world", (0.0, 0.0))
@@ -3496,7 +3540,7 @@ def town_click(frame, rect, cfg, inp, tst, now, lc):
             return None
         if not tst.get("click_gave_up"):
             tst["click_gave_up"] = True
-            log(f"點了主持人 {tc.get('click_wait', 30)} 秒還沒走到 → 改成自己走過去")
+            log(f"點了{town_npc_name(tc)} {tc.get('click_wait', 30)} 秒還沒走到 → 改成自己走過去")
         return False
     target = tst.get("target")
     if target is None:
@@ -3513,9 +3557,9 @@ def town_click(frame, rect, cfg, inp, tst, now, lc):
         return None                                 # 已經在旁邊了，等交談提示
     ox, oy = rect[0], rect[1]
     MOVER.set(None, False)
-    log(f"點{tc.get('npc_name', '節慶主持人')}一次，讓角色自己走過去（距離約 {d:.0f} 像素）")
-    inp.click_item({"text": tc.get("npc_name", "節慶主持人"), "x": ox + cx - 5, "y": oy + cy - 5,
-                    "w": 10, "h": 10}, tc.get("npc_name", "節慶主持人"))
+    nm = town_npc_name(tc)
+    log(f"點{nm}一次，讓角色自己走過去（距離約 {d:.0f} 像素）")
+    inp.click_item({"text": nm, "x": ox + cx - 5, "y": oy + cy - 5, "w": 10, "h": 10}, nm)
     park_mouse(rect)
     tst["click_n"] = 1
     tst["click_t"] = now
@@ -3586,6 +3630,9 @@ def town_step(frame, rect, cfg, inp, tst):
     if not tst.get("zoom_done"):
         tst["zoom_done"] = True
         zn = int(tc.get("zoom_out", 10) or 0)
+        if zn and town_mode(tc) == "expedition":
+            # 隊長就在出生點旁邊，不用拉遠；拉遠後名字太小反而讀不到
+            zn = 0
         if zn and tc.get("click_move", True):
             MOVER.set(None, False)
             log(f"城鎮拉遠視野（滾輪 {zn} 格）")
@@ -3634,6 +3681,28 @@ def town_step(frame, rect, cfg, inp, tst):
         if tst.get("last_dir") and now - tst.get("last_seen", 0) < 2.5:
             return tst["last_dir"]
         npc_w = tst.get("npc_world")
+        if npc_w is None and town_mode(tc) == "expedition" and not tst.get("cap_guess"):
+            # 隊長的名字讀不到：照主持人的位置（或出生點）推算隊長大概在哪，先走過去
+            t0 = tst.setdefault("cap_t0", now)
+            H_, W_ = frame.shape[:2]
+            k = W_ / 1264.0 * (TOWN_ZOOM_SCALE if tst.get("zoomed") else 1.0)
+            hw = tst.get("host_w")
+            if hw is not None:
+                tst["cap_guess"] = True
+                npc_w = tst["npc_world"] = (hw[0] + CAPTAIN_FROM_HOST[0] * k, hw[1] + CAPTAIN_FROM_HOST[1] * k)
+                log("還沒讀到遠征隊長的名字 → 照節慶主持人的位置推算（隊長在他左下方），先走過去")
+            elif now - t0 > 4 and tst.get("fresh"):
+                tst["cap_guess"] = True
+                npc_w = tst["npc_world"] = (CAPTAIN_FROM_SPAWN[0] * k, CAPTAIN_FROM_SPAWN[1] * k)
+                log("還沒讀到遠征隊長的名字 → 先往隊長平常站的位置走（出生點右下方）")
+        if town_mode(tc) == "expedition" and not tst.get("cap_snap") \
+                and now - tst.get("cap_t0", now) > 25:
+            tst["cap_snap"] = True
+            try:
+                save_snapshot(frame, "captain_lost")
+                log("找遠征隊長找了 25 秒還沒看到 → 畫面存在 logs\\captain_lost_*.jpg，可以傳給開發者看")
+            except Exception:
+                pass
         if npc_w is None and not tst.get("guess_used") and tc.get("learn_route", True) \
                 and not tst.get("zoomed"):
             rt_ = load_route()
@@ -3641,14 +3710,14 @@ def town_step(frame, rect, cfg, inp, tst):
             if rt_ and rt_.get("size") == [W_, H_] and rt_.get("npc"):
                 tst["guess_used"] = True
                 npc_w = tst["npc_world"] = (float(rt_["npc"][0]), float(rt_["npc"][1]))
-                log(f"畫面上看不到{tc.get('npc_name', '節慶主持人')} → 先往上次主持人的位置走")
+                log(f"畫面上看不到{town_npc_name(tc)} → 先往上次主持人的位置走")
         if npc_w is not None and not tst.get("npc_w_reached"):
             # 剛剛有看到過主持人 → 先走回記得的位置（不要亂走）
             wx, wy = tst.get("world", (0.0, 0.0))
             gx, gy = npc_w[0] - wx, npc_w[1] - wy
             gd = math.hypot(gx, gy)
             if not tst.get("lost_logged"):
-                log(f"畫面上暫時看不到{tc.get('npc_name', '節慶主持人')} → 往剛才看到的位置走")
+                log(f"畫面上暫時看不到{town_npc_name(tc)} → 往剛才看到的位置走")
                 tst["lost_logged"] = True
             if gd > 40:
                 desired = (gx / gd, gy / gd)
@@ -3662,7 +3731,7 @@ def town_step(frame, rect, cfg, inp, tst):
         if npc_w is not None:
             # 走到記得的位置還是看不到：繞著那個位置一圈一圈往外找（不要亂走到很遠）
             if not tst.get("lost_logged"):
-                log(f"畫面上找不到{tc.get('npc_name', '節慶主持人')} → 在剛才看到的位置附近繞圈找")
+                log(f"畫面上找不到{town_npc_name(tc)} → 在剛才看到的位置附近繞圈找")
                 tst["lost_logged"] = True
                 tst["spiral_t0"] = now
             el = now - tst.get("spiral_t0", now)
@@ -3680,7 +3749,7 @@ def town_step(frame, rect, cfg, inp, tst):
             step = sd or (gx / gd, gy / gd)
             return _town_stuck(tst, now, world, step) or step
         if not tst.get("lost_logged"):
-            log(f"畫面上找不到{tc.get('npc_name', '節慶主持人')}，四處找找")
+            log(f"畫面上找不到{town_npc_name(tc)}，四處找找")
             tst["lost_logged"] = True
         if now >= tst.get("wander_next", 0):
             ang = random.uniform(0, 2 * math.pi)
