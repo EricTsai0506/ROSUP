@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.11"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.12"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -2297,11 +2297,35 @@ def save_boss_shot(frame, game_no, prefix="boss"):
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
             buf.tofile(path)
-        files = sorted(f for f in os.listdir(d) if f.endswith(".jpg"))
-        for f in files[:-600]:
-            os.remove(os.path.join(d, f))
+        BOSS_SHOTS["n"] += 1
+        if BOSS_SHOTS["n"] % 40 == 1:
+            trim_boss_dir(d)
     except Exception as e:
         log(f"頭目截圖存檔失敗：{e}")
+
+
+BOSS_SHOTS = {"n": 0}
+
+
+def trim_boss_dir(d, keep=600):
+    """logs\\boss 最多留 keep 張：刪最舊的（照存檔時間；以前照檔名排，新存的 boss_*／bell_* 反而先被刪掉）"""
+    try:
+        files = []
+        for f in os.listdir(d):
+            if f.endswith(".jpg"):
+                p = os.path.join(d, f)
+                try:
+                    files.append((os.path.getmtime(p), p))
+                except OSError:
+                    pass
+        files.sort()
+        for _, p in files[:-keep]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 END_RING = []          # 最近 20 秒的畫面（JPEG），一局提早結束時存下來看是怎麼倒下的
@@ -2348,6 +2372,33 @@ def crowded(now, dodger, hp, mcfg):
     return False
 
 
+def fresh_ingame(now, ingame_t):
+    """最近 6 秒有沒有看到戰鬥畫面。剛按完「返回角色」的那 4 秒內讀到的不算：
+    背景的文字辨識有延遲，那是離開前的舊畫面；當成新的戰鬥會卡 45 秒才回城鎮、那一場也不會算進統計"""
+    return now - ingame_t < 6 and ingame_t > GAME.get("left_t", 0) + 4.0
+
+
+def slow_check(now):
+    """遊戲計時每多一分鐘，記一次實際時間。連續 3 分鐘（遊戲時間）每一分鐘都花超過 150 秒
+    → 遊戲本身跑得很慢（平常含選寶箱的時間大約 75 秒），寫進紀錄和報表"""
+    m = int(GAME.get("max_timer", 0)) // 60
+    marks = GAME.setdefault("min_marks", [])
+    if marks and m <= marks[-1][0]:
+        return
+    if marks and m != marks[-1][0] + 1:
+        del marks[:]                         # 計時跳號（讀錯）→ 重新量
+    marks.append((m, now))
+    del marks[:-4]
+    if len(marks) < 4 or GAME.get("slow_logged"):
+        return
+    d = [marks[i + 1][1] - marks[i][1] for i in range(3)]
+    if min(d) > 150:
+        GAME["slow_logged"] = True
+        log(f"遊戲跑得很慢：遊戲時間 1 分鐘要花 {sum(d) / 3:.0f} 秒（平常大約 75 秒）。"
+            "常見原因：螢幕關閉或電腦進入省電、電腦被別的程式佔用、用遠端桌面連線後斷線。"
+            "這段時間每一場會拖很久、也比較容易撞牆")
+
+
 def ring_push(frame, now):
     if END_RING and now - END_RING[-1][0] < 1.0:
         return
@@ -2367,7 +2418,10 @@ def dump_end_ring(cfg, result_frame=None):
         hp = GAME.get("last_hp")
         hp_s = f"、最後看到的 HP {hp[0]}/{hp[1]}" if hp else ""
         log(f"這局計時最多到 {mt // 60}:{mt % 60:02d}{hp_s}")
-        if mt >= cfg["move"].get("boss_capture_from", 830) or not END_RING:
+        dead = bool(hp and hp[0] == 0)
+        early = 0 < mt < cfg["move"].get("boss_capture_from", 830) and not GAME.get("ending_logged")
+        # 倒下（包含倒在最後的頭目）或還沒打到最後就結束才存；通關的不存（有的關卡只有 10 分鐘）
+        if not END_RING or not (dead or early):
             return
         if END_CAP["games"] >= int(cfg["move"].get("end_capture", 5) or 0):
             return
@@ -2381,7 +2435,9 @@ def dump_end_ring(cfg, result_frame=None):
             ok, buf = cv2.imencode(".jpg", result_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 buf.tofile(os.path.join(d, f"{tag}_result.jpg"))
-        log(f"這局提早結束（可能角色倒下）→ 最後 {len(END_RING)} 秒的畫面存在 logs\\boss\\{tag}_*.jpg")
+        log(("這局角色倒下" if dead else "這局提早結束（可能角色倒下）")
+            + f" → 最後 {len(END_RING)} 秒的畫面存在 logs\\boss\\{tag}_*.jpg")
+        trim_boss_dir(d)
     except Exception as e:
         log(f"結束前截圖存檔失敗：{e}")
     finally:
@@ -2448,6 +2504,7 @@ def report_game_end(cfg):
         rec = {"start": GAME.get("battle_t0"), "end": now, "stage": stage, "result": result,
                "max_timer": mt, "cause": cause, "last_hp": list(hp) if hp else None,
                "hp_min_pct": GAME.get("hp_min_pct"), "char_lv": GAME.get("char_lv"),
+               "slow": bool(GAME.get("slow_logged")), "bells": GAME.get("bell_count", 0),
                "bosses": [dict(b) for b in GAME.get("boss_log", [])]}
         path = _rep.record(LOG_DIR, rec, cfg["move"].get("boss_times"))
         wb = _rep.worst_boss(rec)
@@ -2581,99 +2638,248 @@ def pick_card(card, cards, items, inp, use_keys=True):
     inp.click_item(card["title"])
 
 
-def find_bell(frame):
-    """斐揚洞穴頭目機制的金色大鐘：回傳最大那個鐘的位置（畫面座標）或 None"""
-    b = find_bells(frame)
-    return max(b, key=lambda c: c[2])[:2] if b else None
+BELL_EP_MAX = 34.0   # 一次躲鐘最長幾秒（第二次的鐘：提示出現到鐘響大約 23 秒，留一點餘裕）
+BELL_FEET = 28       # 角色的腳在角色中心下面幾像素：要讓腳站在圓盤正中央
+BELL_SAME = 170      # 兩個圓盤中心距離小於這個 → 當成同一個鐘
+BELL = {"scales": None, "cand": None}    # 這次啟動實際量到的圓盤大小（視野沒拉到最遠的人，圓盤比較大）
 
 
-def find_bells(frame, relaxed=False):
-    """畫面上所有的金色大鐘：[(x, y, 面積), ...]。
-    relaxed：「躲到鐘下」期間用，比較小、或一半在畫面外的鐘也算"""
-    H, W = frame.shape[:2]
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    m = ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 28) & (hsv[:, :, 1] >= 70)
-         & (hsv[:, :, 2] >= 90)).astype(np.uint8)
-    m[:int(H * 0.16), :] = 0                                   # 上方 HUD
-    m[:int(H * 0.35), int(W * 0.8):] = 0                       # 右上小地圖
-    m[int(H * 0.86):, int(W * 0.33):int(W * 0.67)] = 0         # 下方技能欄
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    n, _, st, _ = cv2.connectedComponentsWithStats(m)
-    out = []
-    for i in range(1, n):
-        x, y, w, h, a = st[i]
-        edge = x <= 2 or x + w >= W - 2 or y + h >= H - 2 or y <= int(H * 0.16) + 2
-        if w > W * 0.35 or h > H * 0.45:          # 整片沙地、木頭地板不是鐘
-            continue
-        if a >= 9000 and 0.5 < w / max(h, 1) < 2.0 and a >= 0.35 * w * h:
-            pass
-        elif relaxed and a >= 3500 and 0.4 < w / max(h, 1) < 2.5 and a >= 0.3 * w * h:
-            pass                                  # 比較小（離比較遠／被擋住一部分）
-        elif relaxed and edge and a >= 2000:
-            pass                                  # 一半在畫面外
+def _bell_w(x, y, lc, world):
+    """畫面上的圓盤中心 → 角色中心要走到的位置（世界座標）"""
+    return (x - lc[0] + world[0], y - BELL_FEET - lc[1] + world[1])
+
+
+def _bell_find(frame, ep=None, now=0.0):
+    """找鐘底下的圓盤（boss.bell_discs）。
+    預設的大小是「視野拉到最遠」時的大小；用預設大小一直找不到（或別的大小明顯更像）時，
+    試其他大小——連續兩次都量到同一個大小才記下來，之後就照那個大小找"""
+    import boss as _b
+    ds = _b.bell_discs(frame, scales=BELL["scales"] or _b.BELL_SCALES)
+    # 已經有目標就不用再量；但上一次量到不一樣的大小、還沒確認第二次 → 繼續量
+    if ep is None or BELL["scales"] is not None or (ep["target"] is not None and BELL.get("cand") is None) \
+            or now - ep["start"] < 0.8 or now < ep["wide_next"]:
+        return ds
+    ep["wide_next"] = now + 0.6
+    wd = _b.bell_discs(frame, scales=_b.BELL_SCALES_WIDE, max_n=1)
+    if not wd or not _b.bell_ok(wd[0]):
+        return ds
+    w = wd[0]
+    base = max([d["votes"] for d in ds if _b.bell_ok(d)] or [0.0])
+    if 0.9 <= w["scale"] <= 1.1 or w["votes"] < base * 1.3:
+        BELL["cand"] = None
+        return ds                            # 預設的大小就對了
+    if w["ratio"] >= 9 and w["votes"] >= 320 and w["cover"] >= 0.7 and w["vis"] >= 0.3:
+        c = BELL.get("cand")
+        if c is not None and abs(c - w["scale"]) < 0.02:
+            sc = w["scale"]
+            BELL["scales"] = (sc * 0.95, sc, sc * 1.05)
+            log(f"鐘的大小是預設的 {sc:.2f} 倍（視野沒有拉到最遠）→ 之後照這個大小找")
         else:
-            continue
-        out.append((x + w / 2, y + h * 0.6, a))
-    return out
+            BELL["cand"] = w["scale"]
+    return wd
 
 
-BELL_EP_SEC = 15     # 每次「躲到鐘下！」最多花幾秒找鐘、站在鐘底下
+def _bell_end(ep, now, why):
+    hp = GAME.get("last_hp")
+    hp_s = f"，HP {hp[0]}/{hp[1]}" if hp else ""
+    if ep["reach_logged"] and ep["target"] is not None:
+        GAME.setdefault("bells_done", []).append(ep["target"])
+        log(f"第 {ep['n']} 次躲鐘結束（{why}）：在鐘底下站了 {now - ep['reach_t']:.0f} 秒{hp_s}")
+    elif ep["target"] is not None:
+        log(f"第 {ep['n']} 次躲鐘結束（{why}）：有看到鐘、但沒有走到鐘底下{hp_s}")
+    else:
+        log(f"第 {ep['n']} 次躲鐘結束（{why}）：一直沒找到鐘{hp_s}")
+    GAME["bell_ep"] = None
+    GAME["bell_end_t"] = now
 
 
-def bell_step(frame, lc, world, now, banner, hold_on):
-    """頭目機制「躲到鐘下！」。回傳 ("move", 方向)／("stay", None)／None（現在不用躲鐘）
-    - 讀到提示字 → 開始一次躲鐘（最多 15 秒）：一直找鐘、走過去、站在鐘底下（提示字消失也繼續）
-    - 第二次躲鐘時，先去還沒站過的鐘（第一個鐘可能還留在畫面上）
-    - 等頭目時看到新的鐘也會去（提示字沒讀到也不會漏掉）"""
+def _bell_search(frame, ep, lc, world, now):
+    """畫面上還沒看到鐘：先等一下 → 看有沒有往內縮的大紅圈（圓心就是鐘）→ 上下移動把被介面擋住的地方露出來"""
+    import boss as _b
+    wx, wy = world
+    el = now - ep["start"]
+    if el < 1.2:
+        return ("stay", None)
+    if now >= ep["ring_next"]:
+        ep["ring_next"] = now + 0.25
+        sc = (BELL["scales"] or (1.0, 1.0))[1]
+        r = _b.red_ring_center(frame, scale=sc)
+        if r is not None and r[3] >= 5.0 and r[2] >= 25:
+            c = _bell_w(r[0], r[1], lc, world)
+            pr = ep["ring"]
+            if pr is not None and math.hypot(pr[0] - c[0], pr[1] - c[1]) < 120:
+                ep["ring"] = ((pr[0] + c[0]) / 2, (pr[1] + c[1]) / 2, now, pr[3] + 1)
+            else:
+                ep["ring"] = (c[0], c[1], now, 1)
+    rg = ep["ring"]
+    if rg is not None and rg[3] >= 2 and now - rg[2] < 3.0:
+        dx, dy = rg[0] - wx, rg[1] - wy
+        dist = math.hypot(dx, dy)
+        if not ep["ring_logged"]:
+            ep["ring_logged"] = True
+            log(f"第 {ep['n']} 次躲鐘：還沒看到鐘，但看到往內縮的大紅圈 → 往紅圈的圓心走（鐘在那裡，約 {dist:.0f} 像素）")
+        if dist > 40:
+            return ("move", (dx / dist, dy / dist), dist)
+        return ("stay", None)
+    if not ep["missing"]:
+        ep["missing"] = True
+        log(f"第 {ep['n']} 次躲鐘：畫面上還沒看到鐘（可能被介面擋住或在畫面外）→ 上下移動找"
+            "（畫面存在 logs 的 bell_missing_*.jpg）")
+        save_image(frame, "bell_missing")
+    # 鐘通常離角色 350～500 像素；正上方、正下方的會被上面的血條／下面的技能欄擋住 → 上下各走一段就看得到
+    t = (el - 1.2) % 7.5
+    if t < 1.3:
+        return ("move", (0.0, -1.0), 150.0)       # 往上
+    if t < 3.9:
+        return ("move", (0.0, 1.0), 150.0)        # 往下（回到原位再多走一段）
+    if t < 5.2:
+        return ("move", (0.0, -1.0), 150.0)       # 回原位
+    if t < 6.3:
+        return ("move", (1.0, 0.0), 150.0)        # 往右
+    return ("move", (-1.0, 0.0), 150.0)           # 往左
+
+
+def bell_step(frame, lc, world, now, banner_t, hold_on, mvp_on=True):
+    """斐揚洞穴頭目「月夜貓」的機制：「躲到鐘下！」「鐘開啟了！快躲到下面」。
+    沒躲到鐘底下會被扣大約 900 滴血（最難的難度），血不夠多就直接倒下。
+    回傳 ("move", 方向, 距離)／("stay", None)／None（現在不用躲鐘）
+    - 讀到提示字（或頭目戰中看到很明顯的鐘）→ 開始一次躲鐘
+    - 找鐘底下的圓盤（鐘蓋著、打開、半個在畫面外都找得到），走到圓盤正中央
+    - 站好之後一直站到鐘消失為止（中間不會被「躲紅圈」推出去：鐘響之前鐘的周圍會有一圈紅色）
+    - 新的提示字出現 → 換找新的鐘（還沒站過的優先）"""
+    import boss as _b
     ep = GAME.get("bell_ep")
     done = GAME.setdefault("bells_done", [])
     wx, wy = world
     if GAME.get("ending_logged"):
+        if ep is not None:
+            _bell_end(ep, now, "頭目打完了")
         return None                                   # 頭目死了、最後倒數：不用再躲
-    if ep is not None and now > ep["until"]:
-        if not ep["reached"]:
-            log(f"第 {ep['n']} 次躲鐘結束，沒有走到鐘底下")
-        ep = GAME["bell_ep"] = None
+    # ---- 這一次躲完了嗎 ----
+    if ep is not None:
+        if now > ep["until"]:
+            _bell_end(ep, now, "時間到")
+            ep = None
+        elif ep["reached"] and now - ep["seen_t"] > 3.5:
+            _bell_end(ep, now, "鐘消失了")
+            ep = None
+    # ---- 要不要開始新的一次 ----
+    last_b = GAME.get("bell_banner_t", 0)
+    fresh_banner = now - banner_t < 3.0 and banner_t > last_b + 6     # 同一個提示會連續讀到好幾次，只算一次
+    if banner_t > last_b and not fresh_banner:
+        GAME["bell_banner_t"] = banner_t
     start = None
-    if ep is None:
-        if banner:
-            start = "看到提示字"
-        elif hold_on and GAME.get("bell_count", 0) >= 1:
-            cw = [(bx - lc[0] + wx, by - lc[1] + wy) for bx, by, _ in find_bells(frame)]
-            if any(all(math.hypot(c[0] - d[0], c[1] - d[1]) > 150 for d in done) for c in cw):
-                start = "看到新的鐘"
+    if fresh_banner and ep is not None and now - ep["start"] <= 6:
+        GAME["bell_banner_t"] = banner_t     # 先看到鐘、提示字晚一點才讀到 → 同一次
+        ep["banner"] = True
+    elif fresh_banner:
+        start = "看到提示字"
+        GAME["bell_banner_t"] = banner_t
+    elif ep is None and hold_on and mvp_on and now >= GAME.get("bell_idle_next", 0):
+        # 提示字沒讀到也不會漏掉：頭目戰中每 0.35 秒看一次有沒有很明顯的鐘
+        GAME["bell_idle_next"] = now + 0.35
+        if any(_b.bell_ok(d, strong=True) for d in _bell_find(frame)):
+            start = "看到鐘"
     if start:
+        if ep is not None:
+            _bell_end(ep, now, "出現新的提示")
         n = GAME["bell_count"] = GAME.get("bell_count", 0) + 1
-        ep = GAME["bell_ep"] = {"n": n, "start": now, "until": now + BELL_EP_SEC, "target": None,
-                                "seen_t": 0.0, "reached": False, "missing": False}
-        log(f"頭目機制：第 {n} 次躲到鐘下（{start}）→ 找鐘、走到鐘底下")
+        ep = GAME["bell_ep"] = {"n": n, "start": now, "until": now + BELL_EP_MAX, "target": None, "seen_t": 0.0,
+                                "hits": 0, "reached": False, "reach_t": 0.0, "missing": False, "wide_next": 0.0,
+                                "scan_next": 0.0, "found_logged": False, "ring": None, "ring_next": 0.0,
+                                "ring_logged": False, "best": None, "stuck_t": now, "side_until": 0.0,
+                                "side_sign": 1, "shot_next": 0.0, "hold": 0.0, "reach_logged": False,
+                                "banner": start == "看到提示字", "old_seen": 0.0, "alt": None, "away_t": None}
+        hp = GAME.get("last_hp")
+        log(f"頭目機制：第 {n} 次躲到鐘下（{start}）→ 找鐘、走到鐘底下" + (f"（HP {hp[0]}/{hp[1]}）" if hp else ""))
         save_image(frame, f"bell{n}")
     if ep is None:
         return None
-    cw = [(bx - lc[0] + wx, by - lc[1] + wy) for bx, by, _ in find_bells(frame, relaxed=True)]
-    fresh = [c for c in cw if all(math.hypot(c[0] - d[0], c[1] - d[1]) > 150 for d in done)]
-    pool = fresh or (cw if now - ep["start"] > 4 else [])   # 只看到站過的鐘：等 4 秒再回那個鐘
-    if pool:
+    # ---- 每秒存一張（logs\boss\bell_*），之後可以拿來檢查躲鐘的過程 ----
+    if now >= ep["shot_next"]:
+        ep["shot_next"] = now + 1.0
+        save_boss_shot(frame, GAME.get("games_done", 0) + 1, "bell")
+    # ---- 找圓盤、決定目標 ----
+    if now >= ep["scan_next"]:
+        ep["scan_next"] = now + (0.3 if ep["reached"] and ep["away_t"] is None else 0.1)
+        cw = [_bell_w(d["x"], d["y"], lc, world) for d in _bell_find(frame, ep, now) if _b.bell_ok(d)]
+
+        def is_old(c):
+            return any(math.hypot(c[0] - d[0], c[1] - d[1]) <= BELL_SAME for d in done)
+        # 讀到新的提示字 → 找新的鐘（上一個鐘響完就會消失）；只看到站過的鐘：等 4 秒，沒有新的再回那個鐘
+        fresh = [c for c in cw if not is_old(c)] if ep["banner"] else cw
+        pool = fresh or (cw if now - ep["start"] > 4 else [])
+        if cw and not fresh:
+            ep["old_seen"] = now
         cur = ep["target"]
-        same = [c for c in pool if cur is not None and math.hypot(c[0] - cur[0], c[1] - cur[1]) < 100]
-        ep["target"] = same[0] if same else min(pool, key=lambda c: math.hypot(c[0] - wx, c[1] - wy))
-        ep["seen_t"] = now
-    tgt = ep["target"] if ep["target"] is not None and now - ep["seen_t"] < 6 else None
+        same = [c for c in pool if cur is not None and math.hypot(c[0] - cur[0], c[1] - cur[1]) < 90]
+        if same:
+            c = same[0]
+            ep["target"] = ((cur[0] + c[0]) / 2, (cur[1] + c[1]) / 2)     # 取平均，位置比較穩
+            ep["hits"] += 1
+            ep["seen_t"] = now
+            ep["alt"] = None
+        elif pool:
+            # 看到的鐘不在原本的目標那裡：連續兩次都在同一個新位置才換（一次的雜訊不換；
+            # 鏡頭位移算錯、目標跑掉的時候也靠這個馬上修正）；出現新的鐘就直接換過去
+            c = min(pool, key=lambda c: math.hypot(c[0] - wx, c[1] - wy))
+            al = ep["alt"]
+            ep["alt"] = (c, al[1] + 1) if al is not None and math.hypot(c[0] - al[0][0], c[1] - al[0][1]) < 90 \
+                else (c, 1)
+            if cur is None or ep["hits"] < 2 or ep["alt"][1] >= 2 or now - ep["seen_t"] > 1.5 \
+                    or (ep["banner"] and fresh and is_old(cur)):
+                ep["hits"] = 1 if cur is None else min(ep["alt"][1], 2)
+                ep["target"] = c
+                ep["seen_t"] = now
+                ep["alt"] = None
+                ep["best"], ep["stuck_t"], ep["hold"], ep["away_t"] = None, now, 0.0, None
+    tgt = ep["target"]
+    if tgt is not None and not ep["reached"] and now - ep["seen_t"] > 8:
+        tgt = ep["target"] = None            # 走了 8 秒都沒再看到 → 可能看錯了，重新找
+        ep["hits"] = 0
     if tgt is None:
-        if now - ep["start"] > 2 and not ep["missing"]:
-            ep["missing"] = True
-            log(f"第 {ep['n']} 次躲鐘：畫面上找不到鐘（畫面存在 logs 的 bell_missing_*.jpg）")
-            save_image(frame, "bell_missing")
-        return ("stay", None)
+        if now - ep["old_seen"] < 1.0 and now - ep["start"] <= 4.5:
+            return ("stay", None)            # 上一個鐘還在、新的還沒出現 → 先留在原地等
+        return _bell_search(frame, ep, lc, world, now)
     dx, dy = tgt[0] - wx, tgt[1] - wy
     dist = math.hypot(dx, dy)
-    if dist > 28:
-        return ("move", (dx / dist, dy / dist), dist)
+    if not ep["found_logged"]:
+        ep["found_logged"] = True
+        where = ("上" if dy < -60 else "下" if dy > 60 else "") + ("左" if dx < -60 else "右" if dx > 60 else "")
+        log(f"第 {ep['n']} 次躲鐘：看到鐘了（在{where or '旁邊'}，約 {dist:.0f} 像素）→ 走到鐘的正下方")
+    if dist > (max(55.0, ep["hold"] + 25.0) if ep["reached"] else 30.0):
+        if ep["reached"]:
+            # 站好之後突然離目標很遠：先等 0.45 秒再確認一次（可能只是鏡頭位移算錯），真的被推開才走回去
+            if ep["away_t"] is None:
+                ep["away_t"] = now
+                ep["scan_next"] = now
+            if now - ep["away_t"] < 0.45:
+                return ("stay", None)
+            ep["reached"] = False
+            ep["best"], ep["stuck_t"], ep["hold"], ep["away_t"] = None, now, 0.0, None
+        if ep["best"] is None or dist < ep["best"] - 6:
+            ep["best"], ep["stuck_t"] = dist, now
+        k = frame.shape[1] / 1264.0 * (BELL["scales"] or (1.0, 1.0))[1]
+        inside = (dx / (_b.BELL_A * k)) ** 2 + (dy / (_b.BELL_B * k)) ** 2 < 0.8 ** 2
+        if inside and ep["hits"] >= 2 and now - ep["stuck_t"] > 1.2:
+            ep["hold"] = dist                # 已經在圓盤裡面、被擋住走不到正中央 → 就站這裡
+        else:
+            d = (dx / dist, dy / dist)
+            if not inside and now - ep["stuck_t"] > 1.5:
+                # 在圓盤外面被東西擋住 → 往旁邊繞 0.7 秒
+                ep["side_until"], ep["side_sign"] = now + 0.7, -ep["side_sign"]
+                ep["best"], ep["stuck_t"] = None, now
+            if now < ep["side_until"]:
+                d = rotate(d, 70 * ep["side_sign"])
+            return ("move", d, dist)
+    ep["away_t"] = None
     if not ep["reached"]:
+        if ep["hits"] < 2:
+            return ("stay", None)            # 只看到一次，再確認一下
         ep["reached"] = True
-        done.append(tgt)
-        log(f"第 {ep['n']} 次躲鐘：已經站到鐘底下")
+        if not ep["reach_logged"]:
+            ep["reach_logged"], ep["reach_t"] = True, now
+            log(f"第 {ep['n']} 次躲鐘：已經站到鐘底下（花了 {now - ep['start']:.0f} 秒）→ 站到鐘消失為止")
     return ("stay", None)
 
 
@@ -3933,6 +4139,7 @@ def handle_menu(kind, sct, rect, cfg, inp, st):
         log(f"{label} → 按「{sec['button']}」")
         inp.click_item(btn)
         GAME["phase"] = "town"
+        GAME["left_t"] = time.time()         # 這之後 4 秒內讀到的戰鬥畫面是離開前的舊畫面（文字辨識有延遲）
         GAME.update(max_timer=0, ending_logged=False)
         if kind == "result" and not GAME.get("game_counted"):
             GAME["game_counted"] = True  # 每一局只算一次，進入下一場戰鬥才重設
@@ -4515,9 +4722,14 @@ def handle_resume(items, rect, frame, tc, inp, tst):
         GAME["resume_n"] = n + 1
         log(f"城鎮跳出「未完成的一局」→ 按「繼續」（這一局第 {n + 1} 次繼續）")
         inp.click_item(go, "繼續")
-        GAME["phase"], GAME["battle_seen"] = "battle", time.time()
+        # 不直接當成進入戰鬥：有時候按了「繼續」遊戲只會回「這局已經結束」（那樣會白等 45 秒）。
+        # 真的接回那一局的話，看到戰鬥畫面就會自己切到戰鬥模式
+        GAME["left_t"] = 0
         GAME.update(ending_logged=False, batch_target=None, game_counted=False, hold_logged=False,
                     chest_pick=None)
+        tst["cooldown_until"] = time.time() + 4.0
+        tst["target"] = None
+        return True
     else:
         if tc.get("resume", "continue") != "abandon":
             log(f"這一局已經繼續 {n} 次還是打不完 → 按「捨棄」，重新開一場")
@@ -5151,6 +5363,7 @@ def run(cfg):
                 if tmr is not None and res["t"] > GAME.get("timer_t", 0):
                     GAME["timer_t"] = res["t"]
                     GAME["max_timer"] = max(GAME.get("max_timer", 0), tmr)
+                    slow_check(now)
                 ending = tmr is not None and GAME.get("max_timer", 0) >= 300 \
                     and tmr <= lvc.get("stop_before_end_sec", 25) \
                     and now - GAME.get("bar_t", 0) > 4  # 頭目還在（頭目戰的 2 分鐘倒數）不算
@@ -5189,7 +5402,7 @@ def run(cfg):
                         continue
 
                 # ---- 目前階段：戰鬥 / 城鎮 ----
-                if now - res["ingame_t"] < 6:
+                if fresh_ingame(now, res["ingame_t"]):
                     GAME["game_counted"] = False
                     if GAME["phase"] != "battle":
                         GAME["phase"] = "battle"
@@ -5204,7 +5417,8 @@ def run(cfg):
                     last_coord, coord_same_since = None, now
                     bumps = 0
                     battle_t0 = now
-                    GAME.update(bell_ep=None, bells_done=[], bell_count=0, mvp_logged=False, last_hp=None,
+                    GAME.update(bell_ep=None, bells_done=[], bell_count=0, min_marks=[], slow_logged=False,
+                                mvp_logged=False, last_hp=None,
                                 kite_why=None, boss_hp0=None, boss_seen=[], hp_hist=[], hp_drop_until=0,
                                 crowd_until=0, battle_t0=now, boss_log=[], boss_cur=None, hp_min_pct=None,
                                 kite_hist=[], char_lv=None)
@@ -5445,7 +5659,15 @@ def run(cfg):
                     if town_mode(tcf) == "expedition" else None
                 hold_on = bool(hold and GAME.get("max_timer", 0) >= int(hold))
                 # 頭目機制「躲到鐘下！」：找鐘、走到鐘底下，到了就站著不動
-                bs = bell_step(frame, lc, bst["world"], now, now - res.get("bell_t", 0) < 3.0, hold_on)
+                try:
+                    bs = bell_step(frame, lc, bst["world"], now, res.get("bell_t", 0), hold_on, mvp_on)
+                except Exception as e:      # 躲鐘出錯不能讓整個掛機停掉
+                    bs = None
+                    GAME["bell_ep"] = None
+                    if now >= GAME.get("bell_err_next", 0):
+                        GAME["bell_err_next"] = now + 30
+                        log(f"躲鐘的判斷出錯（不影響掛機，請把紀錄檔傳給開發者）：{e!r}")
+                        log("  " + " ｜ ".join(l.strip() for l in traceback.format_exc().strip().splitlines()[-3:]))
                 if bs is not None:
                     if bs[0] == "move":
                         bd_ = bs[1]

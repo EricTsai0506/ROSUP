@@ -16,8 +16,9 @@ COLS = ["日期", "開始", "結束", "關卡", "結果", "遊戲時間", "倒�
         "最低HP%", "角色等級", "扣血最多的頭目", "該頭目扣血%", "頭目紀錄", "實際花費"]
 
 # 已知的頭目（遊戲裡的寫法）。文字辨識常讀成簡體字、少字、後面黏數字（舞狮678、邪浪人、白素真）
-KNOWN_BOSSES = ["舞獅", "猴桃木", "邪骸浪人", "機木人", "元宵童子", "白素貞", "蛇王", "彈簧兔"]
-_S2T = str.maketrans("狮弹贞机", "獅彈貞機")
+KNOWN_BOSSES = ["舞獅", "猴桃木", "邪骸浪人", "機木人", "元宵童子", "白素貞", "蛇王", "彈簧兔",
+                "月夜貓", "狂暴月夜貓", "海盜之王", "妖君", "邪骸士長", "梅納海葵"]      # 後面這幾隻是遠征關卡的
+_S2T = str.maketrans("狮弹贞机猫盗纳", "獅彈貞機貓盜納")
 NO_NAME = "（沒讀到名字）"
 
 
@@ -179,6 +180,23 @@ def _bucket(sec, times):
     return (edges[-1], f"{mmss(edges[-1])} 以後")
 
 
+def slow_rows(rows):
+    """花特別久的場次：[(那一場, 同一關平常花多久)]。同一關至少 3 場才比；比中位數多 60% 而且多 6 分鐘以上才算"""
+    by = defaultdict(list)
+    for r in rows:
+        if r.get("start") and r.get("end"):
+            by[r.get("stage") or "？"].append(r)
+    out = []
+    for rs in by.values():
+        if len(rs) < 3:
+            continue
+        ds = sorted(r["end"] - r["start"] for r in rs)
+        med = ds[len(ds) // 2]
+        out += [(r, med) for r in rs if r["end"] - r["start"] > max(med * 1.6, med + 360)]
+    out.sort(key=lambda x: x[0]["start"])
+    return out
+
+
 def summary(rows, day, boss_times=None):
     times = boss_times or [150, 330, 450, 630, 750, 840]
     n = len(rows)
@@ -194,6 +212,28 @@ def summary(rows, day, boss_times=None):
     durs = [r["end"] - r["start"] for r in rows if r.get("start") and r.get("end")]
     if durs:
         L.append(f"平均每場實際花 {mmss(sum(durs) / len(durs))}")
+    # 各關卡分開看（一天裡換過關卡的話，合在一起的通關率看不出問題在哪一關）
+    by_stage = defaultdict(list)
+    for r in rows:
+        by_stage[r.get("stage") or "？"].append(r)
+    if len(by_stage) > 1:
+        L += ["", "■ 各關卡"]
+        for st, rs in by_stage.items():
+            o = sum(1 for r in rs if r.get("result") == "通關")
+            dd = sum(1 for r in rs if r.get("result") == "倒下")
+            ds = [r["end"] - r["start"] for r in rs if r.get("start") and r.get("end")]
+            L.append(f"  {st}：{len(rs)} 場、通關 {o}、倒下 {dd}（通關率 {o * 100 // len(rs)}%）"
+                     + (f"、平均每場實際花 {mmss(sum(ds) / len(ds))}" if ds else ""))
+    # 花特別久的場次：遊戲本身跑得慢（螢幕關閉、電腦省電、被別的程式佔用…），不是打得久
+    slow = slow_rows(rows)
+    if slow:
+        tot = sum(r["end"] - r["start"] - med for r, med in slow)
+        L += ["", f"■ 跑得特別慢的場次：{len(slow)} 場，比平常多花了約 {mmss(tot)}"
+                  "（遊戲本身變慢：螢幕關閉、電腦省電、被別的程式佔用…）"]
+        for r, med in slow[:12]:
+            L.append(f"  {time.strftime('%H:%M', time.localtime(r['start']))}～"
+                     f"{time.strftime('%H:%M', time.localtime(r['end']))}  實際花 {mmss(r['end'] - r['start'])}"
+                     f"（同一關平常 {mmss(med)}）")
     if dead:
         L += ["", "■ 倒下的時間（遊戲計時，用頭目出現的時間分段）"]
         bk = Counter(_bucket(r.get("max_timer") or 0, times) for r in dead)
@@ -219,10 +259,13 @@ def summary(rows, day, boss_times=None):
         (a, label), bc = Counter(_bucket(r.get("max_timer") or 0, times) for r in dead).most_common(1)[0]
         L += ["", f"■ 最需要加強：最常倒在 {label}（{bc} 場），原因最常是「{top_cause}」（{tc} 場）"]
     L += ["", "■ 每一場"]
+    multi = len(by_stage) > 1
     for r in rows:
         wb = worst_boss(r)
         L.append(f"  {time.strftime('%H:%M', time.localtime(r['end'])) if r.get('end') else '':>5} "
                  f"{r.get('result', ''):<4} 計時 {mmss(r.get('max_timer')):>5}"
+                 + (f"  實際 {mmss(r['end'] - r['start']):>5}" if r.get("start") and r.get("end") else "")
+                 + (f"  {(r.get('stage') or '').replace('遠征：', '')}" if multi else "")
                  + (f"  原因：{r['cause']}" if r.get("result") == "倒下" and r.get("cause") else "")
                  + (f"  扣最多：{boss_name(wb[0].get('name'))} {wb[1]:.0f}%" if wb and wb[1] >= 1 else "")
                  + (f"  Lv {r['char_lv']}" if r.get("char_lv") else ""))

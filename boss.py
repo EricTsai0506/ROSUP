@@ -390,3 +390,171 @@ def boss_bar(frame):
                         return True
                 break
     return False
+
+
+# =====================================================================
+#  斐揚洞穴「月夜貓」的鐘：找鐘底下的圓盤（要站進去的地方）
+# =====================================================================
+# 鐘不管是蓋著（金色的鐘坐在圓盤上）還是打開（鐘吊到上面、露出圓盤），地上都有同一個
+# 卡其色的橢圓圓盤（邊框＋一圈虛線）。用「邊緣的梯度方向投票找橢圓圓心」來找：
+# 每個卡其色邊緣點沿著自己的梯度方向、往固定半徑的地方投一票，真的圓盤會有幾百票投在同一點；
+# 只露出一小段弧（圓盤大半在畫面外、或被介面擋住）也找得到，圓心可以在畫面外。
+BELL_A, BELL_B = 136.0, 111.0      # 圓盤半徑（橫、直），單位是 1264 寬畫面的像素（視野拉到最遠時）
+BELL_SCALES = (0.95, 1.0, 1.05)
+BELL_SCALES_WIDE = (0.85, 0.95, 1.05, 1.18, 1.32, 1.5, 1.7)   # 視野沒拉到最遠的人：圓盤比較大
+_BELL_VALID = {}
+
+
+def _bell_valid(H, W):
+    """介面以外的區域（1 = 可以看）"""
+    v = _BELL_VALID.get((H, W))
+    if v is None:
+        v = np.ones((H, W), np.uint8)
+        v[:int(H * 0.125), :int(W * 0.345)] = 0                      # 頭像、HP
+        v[:int(H * 0.065), int(W * 0.44):int(W * 0.56)] = 0          # 計時
+        v[int(H * 0.065):int(H * 0.105), int(W * 0.38):int(W * 0.62)] = 0   # 擊殺數、金幣
+        v[int(H * 0.155):int(H * 0.23), int(W * 0.26):int(W * 0.74)] = 0    # 頭目名字、血條
+        v[:int(H * 0.30), int(W * 0.805):] = 0                       # 小地圖
+        v[int(H * 0.80):, int(W * 0.33):int(W * 0.67)] = 0           # 道具欄、技能欄
+        v = cv2.erode(v, np.ones((7, 7), np.uint8))
+        if len(_BELL_VALID) > 4:
+            _BELL_VALID.clear()
+        _BELL_VALID[(H, W)] = v
+    return v
+
+
+def _ellipse_votes(xs, ys, gxv, gyv, a, b, pol, pad, q, Wq, Hq):
+    """每個邊緣點沿梯度方向推回橢圓圓心（pol=1：裡面比較亮），回傳 (圓心 x, 圓心 y, 投票用的格子編號)"""
+    px = a * a * gxv
+    py = b * b * gyv
+    s = np.sqrt((px / a) ** 2 + (py / b) ** 2) + 1e-6
+    cx = xs + pol * px / s
+    cy = ys + pol * py / s
+    ix = ((cx + pad[0]) / q).astype(np.int32)
+    iy = ((cy + pad[1]) / q).astype(np.int32)
+    ok = (ix >= 0) & (ix < Wq) & (iy >= 0) & (iy < Hq)
+    return cx, cy, iy[ok] * Wq + ix[ok]
+
+
+def bell_discs(frame, scales=BELL_SCALES, max_n=2, mag_thr=14.0, pad_frac=0.28, q=2, max_edges=60000):
+    """找鐘底下的圓盤。回傳 list（最多 max_n 個，票數多的在前面），每個是 dict：
+    x, y = 圓盤中心（畫面座標，可能在畫面外）、votes = 票數、ratio = 比背景突出幾倍、
+    cover = 看得到的那段圓周有多少比例有票、vis = 圓周有幾分之幾看得到、scale = 大小比例"""
+    H, W = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    km = cv2.inRange(hsv, (10, 25, 30), (36, 255, 255))                 # 卡其／金色
+    base = cv2.bitwise_and(cv2.min(frame[:, :, 1], frame[:, :, 2]), km)   # min(G,R)：卡其色亮、紅和黑都暗
+    g = cv2.GaussianBlur(base, (5, 5), 0)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    v = _bell_valid(H, W)
+    ys, xs = np.nonzero((mag > mag_thr) & (v > 0))
+    n = len(xs)
+    if n < 80:
+        return []
+    wt = 1.0
+    if n > max_edges:                      # 邊太多（比較亮的地圖）→ 抽樣，票數再乘回來
+        step = int(math.ceil(n / float(max_edges)))
+        ys, xs = ys[::step], xs[::step]
+        wt = float(step)
+    gxv, gyv = gx[ys, xs], gy[ys, xs]
+    pad = (int(W * pad_frac), int(W * pad_frac))
+    Wq, Hq = (W + 2 * pad[0]) // q + 1, (H + 2 * pad[1]) // q + 1
+    k = W / 1264.0
+    sg = 3.0 / q
+    best = None
+    for sc in scales:
+        acc = np.zeros(Hq * Wq, np.float32)
+        cs = []
+        for pol, dr in ((1.0, 0.0), (-1.0, -6.0)):       # 邊框外緣（裡面亮）、邊框內緣（裡面暗，半徑小一點）
+            cx, cy, idx = _ellipse_votes(xs, ys, gxv, gyv, (BELL_A * sc + dr) * k, (BELL_B * sc + dr) * k,
+                                         pol, pad, q, Wq, Hq)
+            acc += np.bincount(idx, minlength=Hq * Wq)
+            cs.append((cx, cy))
+        acc = cv2.GaussianBlur(acc.reshape(Hq, Wq), (0, 0), sg) * (2 * math.pi * sg * sg) * wt
+        mx = float(acc.max())
+        if best is None or mx > best[0]:
+            best = (mx, sc, acc, cs)
+    mx, sc, acc, cs = best
+    inner = acc[pad[1] // q:(pad[1] + H) // q:3, pad[0] // q:(pad[0] + W) // q:3].ravel()
+    kth = int(len(inner) * 0.99)
+    bg = max(float(np.partition(inner, kth)[kth]), 1e-3)
+    a, b = BELL_A * sc * k, BELL_B * sc * k
+    ang = (np.arange(36) + 0.5) / 36 * 2 * math.pi - math.pi
+    out = []
+    for _ in range(max_n):
+        _, pk, _, loc = cv2.minMaxLoc(acc)
+        if pk <= 0:
+            break
+        X = loc[0] * q - pad[0] + q / 2.0
+        Y = loc[1] * q - pad[1] + q / 2.0
+        # 這個圓心的票來自圓周的哪些角度：真的圓盤，看得到的那段圓周幾乎每個方向都有票
+        sel = np.zeros(len(xs), bool)
+        for cx, cy in cs:
+            sel |= (np.abs(cx - X) < 7) & (np.abs(cy - Y) < 7)
+        th = np.arctan2((ys[sel] - Y) / b, (xs[sel] - X) / a)
+        hist = np.bincount(((th + math.pi) / (2 * math.pi) * 36).astype(np.int32) % 36, minlength=36)
+        ex = np.rint(X + a * np.cos(ang)).astype(np.int32)
+        ey = np.rint(Y + b * np.sin(ang)).astype(np.int32)
+        vis = (ex >= 0) & (ex < W) & (ey >= 0) & (ey < H)
+        vis[vis] = v[ey[vis], ex[vis]] > 0
+        nvis = int(vis.sum())
+        cover = float(((hist >= max(1.0, 3.0 / wt)) & vis).sum()) / max(nvis, 1)
+        out.append({"x": float(X), "y": float(Y), "votes": float(pk), "ratio": float(pk) / bg,
+                    "cover": cover, "vis": nvis / 36.0, "scale": sc, "a": a, "b": b})
+        # 把這個圓心附近清掉，再找下一個
+        cv2.ellipse(acc, (loc[0], loc[1]), (int(a * 1.3 / q), int(b * 1.3 / q)), 0, 0, 360, 0.0, -1)
+    return out
+
+
+def bell_ok(d, strong=False):
+    """bell_discs 找到的這個夠不夠像鐘的圓盤。strong：沒看到提示字時用，標準比較高"""
+    if d is None:
+        return False
+    if strong:
+        return d["ratio"] >= 9.0 and d["votes"] >= 320 and d["cover"] >= 0.7 and d["vis"] >= 0.4
+    if d["vis"] < 0.09:
+        return False
+    return d["ratio"] >= 5.2 and d["votes"] >= 120 and d["cover"] >= 0.6
+
+
+def red_ring_center(frame, ks=(1.6, 2.0, 2.4, 2.8, 3.2, 3.6, 4.0, 4.4), scale=1.0, mag_thr=10.0):
+    """鐘快要響的時候，會有一個很大的紅圈以鐘為圓心往內縮。只看得到紅圈的一段弧也可以推出圓心
+    （= 鐘的位置，可以在畫面外很遠）。回傳 (x, y, 票數, 突出倍數) 或 None。
+    ks = 紅圈半徑是圓盤的幾倍（一直在縮，所以幾種都試）"""
+    H0, W0 = frame.shape[:2]
+    small = cv2.resize(frame, (W0 // 2, H0 // 2), interpolation=cv2.INTER_AREA)
+    H, W = small.shape[:2]
+    b, g, r = [small[:, :, i].astype(np.int16) for i in range(3)]
+    red = np.clip(r - np.maximum(g, b), 0, 255).astype(np.uint8)
+    gm = cv2.GaussianBlur(red, (3, 3), 0)
+    gx = cv2.Sobel(gm, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gm, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    v = cv2.resize(_bell_valid(H0, W0), (W, H), interpolation=cv2.INTER_NEAREST)
+    ys, xs = np.nonzero((mag > mag_thr) & (v > 0))
+    if len(xs) < 150:
+        return None
+    if len(xs) > 40000:
+        st = int(math.ceil(len(xs) / 40000.0))
+        ys, xs = ys[::st], xs[::st]
+    gxv, gyv = gx[ys, xs], gy[ys, xs]
+    q = 4
+    pad = (W, H)                                 # 圓心可以在畫面外一整個畫面遠
+    Wq, Hq = (W + 2 * pad[0]) // q + 1, (H + 2 * pad[1]) // q + 1
+    k = W0 / 1264.0 / 2.0 * scale
+    best = None
+    for kk in ks:
+        acc = np.zeros(Hq * Wq, np.float32)
+        for pol in (1.0, -1.0):
+            _, _, idx = _ellipse_votes(xs, ys, gxv, gyv, BELL_A * kk * k, BELL_B * kk * k, pol, pad, q, Wq, Hq)
+            acc += np.bincount(idx, minlength=Hq * Wq)
+        acc = cv2.GaussianBlur(acc.reshape(Hq, Wq), (0, 0), 1.5)
+        _, mx, _, loc = cv2.minMaxLoc(acc)
+        if best is None or mx > best[2]:
+            sub = acc[::3, ::3].ravel()
+            kth = int(len(sub) * 0.995)
+            bg = max(float(np.partition(sub, kth)[kth]), 1e-3)
+            best = ((loc[0] * q - pad[0] + q / 2.0) * 2, (loc[1] * q - pad[1] + q / 2.0) * 2, float(mx), float(mx) / bg)
+    return best

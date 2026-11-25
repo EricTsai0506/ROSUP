@@ -987,11 +987,13 @@ class App:
 
     def verify_update(self):
         """上次按了更新 → 重開後確認真的換成新版了"""
-        to = updater.take_pending()
+        to, brief = updater.take_pending()
         if not to:
             return
         if updater.parse_ver(rb.VERSION) >= updater.parse_ver(to):
-            self.add_log(f"已更新到 v{rb.VERSION}")
+            self.add_log(f"已更新到 v{rb.VERSION}" + ("，這次更新：" if brief else ""))
+            for b in brief:
+                self.add_log("  ・" + b)
             return
         messagebox.showwarning(
             APP_TITLE, f"更新沒有成功：現在還是 v{rb.VERSION}（要更新到 v{to}）。\n\n"
@@ -1003,8 +1005,14 @@ class App:
                        "詳細記錄在 logs\\update.log")
 
     def ask_update(self, info, token):
+        # 只列幾行重點，不貼整份更新紀錄
+        try:
+            brief = updater.brief_notes(info.get("notes"), rb.VERSION)
+        except Exception:
+            brief = []
+        what = ("這次更新：\n" + "\n".join("・" + b for b in brief) + "\n\n") if brief else ""
         if not messagebox.askyesno(
-                APP_TITLE, f"有新版本 v{info['version']}（目前 v{rb.VERSION}）\n\n"
+                APP_TITLE, f"有新版本 v{info['version']}（目前 v{rb.VERSION}）\n\n" + what +
                            "要現在更新嗎？（設定、記住的路線、登入資料都會保留，更新完會自動重開）"):
             return
         if self.thread and self.thread.is_alive():
@@ -1039,7 +1047,7 @@ class App:
 
             def finish():
                 try:
-                    updater.mark_pending(info["version"])
+                    updater.mark_pending(info["version"], brief)
                     updater.apply_and_restart(tmp, src)
                 except Exception as e:
                     messagebox.showwarning(APP_TITLE, f"更新失敗：{e}")

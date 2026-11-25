@@ -31,6 +31,44 @@ def parse_ver(v):
     return tuple(out + [0] * (3 - len(out)))
 
 
+def _short(t, width):
+    t = " ".join((t or "").split())
+    return t if len(t) <= width else t[:width - 1].rstrip("、，。；： ") + "…"
+
+
+def brief_notes(notes, current, max_versions=5, max_items=4, width=38):
+    """更新視窗用的精簡更新內容（幾行字，不是整份更新紀錄）。
+    notes 是 GitHub 版本說明（每一版一段，第一行是「v1.2.3 標題」，下面是「- 細項」）。
+    - 只比現在新一版 → 把那一版的標題用「、」拆成幾個重點
+    - 一次跳好幾版 → 每一版一行「v1.2.3 標題」，最多 max_versions 行
+    回傳文字的 list；讀不出來回傳 []"""
+    import re
+    cur = parse_ver(current)
+    secs = []
+    for line in (notes or "").splitlines():
+        m = re.match(r"^\s*#*\s*[vV](\d+(?:\.\d+){1,3})\s*[:：\-－]?\s*(.*)$", line)
+        if m:
+            secs.append([m.group(1), m.group(2).strip(), []])
+        elif secs and re.match(r"^\s*[-・*]\s+\S", line):
+            secs[-1][2].append(re.sub(r"^\s*[-・*]\s+", "", line).strip())
+    new = [s for s in secs if parse_ver(s[0]) > cur]
+    if not new:
+        return []
+    if len(new) == 1:
+        ver, title, items = new[0]
+        parts = [p.strip() for p in re.split(r"[、；;]", title) if p.strip()]
+        if not parts:                       # 沒有標題 → 用前幾個細項
+            parts = items
+        out = [_short(p, width) for p in parts[:max_items]]
+        if len(parts) > max_items:
+            out.append(f"…還有 {len(parts) - max_items} 項")
+        return out
+    out = [_short(f"v{ver} {title or (items[0] if items else '')}", width + 8) for ver, title, items in new[:max_versions]]
+    if len(new) > max_versions:
+        out.append(f"…以及更早的 {len(new) - max_versions} 個版本")
+    return out
+
+
 _CTX = None
 
 
@@ -136,23 +174,24 @@ def can_write():
         return False
 
 
-def mark_pending(version):
+def mark_pending(version, brief=None):
     try:
         with open(PENDING, "w", encoding="utf-8") as f:
-            json.dump({"to": version}, f)
+            json.dump({"to": version, "brief": list(brief or [])}, f, ensure_ascii=False)
     except OSError:
         pass
 
 
 def take_pending():
-    """重開後呼叫：回傳上次要更新到的版本（沒有就 None），並刪掉記錄"""
+    """重開後呼叫：回傳 (上次要更新到的版本, 精簡更新內容)；沒有就 (None, [])，並刪掉記錄"""
     try:
         with open(PENDING, encoding="utf-8") as f:
-            to = json.load(f).get("to")
+            d = json.load(f)
         os.remove(PENDING)
-        return to
-    except (OSError, ValueError):
-        return None
+        brief = d.get("brief") or []
+        return d.get("to"), [str(b) for b in brief if b][:8]
+    except (OSError, ValueError, AttributeError):
+        return None, []
 
 
 def apply_and_restart(tmp, src):
