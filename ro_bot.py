@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.10"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.11"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -4462,6 +4462,26 @@ def handle_resume(items, rect, frame, tc, inp, tst):
         c = [i for i in items if match(i["text"], word) and len(i["n"]) <= 3
              and H * 0.3 < i["cy"] - oy < H * 0.8]
         return max(c, key=lambda i: i["cy"]) if c else None
+    # 第二種：「這局已經結束（時間已到或你開始了另一局）：戰利品會放進你的帳號…」只有一顆 OK
+    if any(norm(k) in joined for k in ("這局已經結束", "已經結束", "戰利品會放進", "開始了另一局", "帶走已獲得")):
+        body = [i for i in items if any(norm(k) in i["n"] for k in ("未完成的一局", "完成的一", "已經結束", "戰利品會放進"))]
+        t = min(body, key=lambda i: i["cy"]) if body else None
+        ty = t["cy"] - oy if t else H * 0.4
+        ok = next((i for i in items if i["n"] in ("ok", "0k", "确定", "确认") and ty < i["cy"] - oy < ty + H * 0.35), None)
+        if ok is None:
+            box = _blue_button(frame, int(W * 0.45), int(ty + H * 0.08), int(W * 0.85), int(min(H, ty + H * 0.35)))
+            if box:
+                ok = {"text": "OK", "x": ox + box[0], "y": oy + box[1], "w": box[2], "h": box[3]}
+            else:
+                ok = {"text": "OK", "x": ox + W * 0.666 - 25, "y": oy + ty + H * 0.19 - 12, "w": 50, "h": 24}
+        MOVER.set(None, False)
+        time.sleep(random.uniform(0.5, 1.1))
+        log("城鎮跳出「這局已經結束，戰利品會放進帳號」→ 按「OK」，重新開一場")
+        inp.click_item(ok, "OK")
+        GAME["resume_n"] = 0
+        tst["cooldown_until"] = time.time() + 2.0
+        tst["target"] = None
+        return True
     go, drop = btn("繼續"), btn("捨棄")
     if go is None and drop is None:
         # 按鈕上的字常讀不到 → 放大視窗下半部再讀一次
