@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.9"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.10"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -325,6 +325,8 @@ DEFAULT_CONFIG = {
         "field_button": "前往野外",
         "learn_route": True,
         "click_move": True,          # 點主持人讓遊戲自己走過去（遊戲內建尋路，不會亂走）；只點一次
+        "resume": "continue",        # 回城鎮跳出「未完成的一局」：continue = 按繼續；abandon = 按捨棄
+        "resume_max": 3,             # 同一局連續繼續幾次還是打不完，就改按捨棄（免得一直卡在同一局）
         "click_wait": 30,            # 點完幾秒還沒走到主持人旁邊，就改回自己走
         "zoom_out": 10,              # 進城鎮後滾輪拉遠幾格，從出生點就看得到主持人（0 = 不調整）
         "mode": "festival",          # festival = 節慶主持人（原本的關卡）；expedition = 遠征隊長
@@ -3341,6 +3343,8 @@ def town_ocr(frame, rect, cfg, inp, tst):
         tst["cooldown_until"] = time.time() + 3
         tst["target"] = None
 
+    if handle_resume(items, rect, frame, tc, inp, tst):
+        return "acted"
     dm = detect_menu(items)
     if dm == "expedition":
         handle_expedition(frame, items, rect, cfg, inp)
@@ -3364,7 +3368,7 @@ def town_ocr(frame, rect, cfg, inp, tst):
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
                     maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0,
                     late_logged=False, focused=set(), focus_off=False, deity_clicks=0, deity_off_until=0,
-                    chest_pick=None)
+                    chest_pick=None, resume_n=0)
         log("進入戰鬥")
         return "acted"
 
@@ -4425,6 +4429,84 @@ def set_difficulty(frame, items, rect, cfg, inp):
         x = a + 3 if level == "min" else b - 3
         inp.click_item({"text": "難度滑桿", "x": x - 1, "y": y - 2, "w": 2, "h": 4}, "難度滑桿")
         time.sleep(random.uniform(0.15, 0.35))
+    return True
+
+
+def _blue_button(frame, x0, y0, x1, y1):
+    """這一塊裡最大的藍色實心按鈕（x, y, w, h），找不到回傳 None"""
+    roi = frame[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, (100, 70, 150), (128, 255, 255))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    for c in cs:
+        x, y, w, h = cv2.boundingRect(c)
+        if 40 <= w <= 220 and 22 <= h <= 80 and 1.3 < w / h < 4.5 and cv2.contourArea(c) > w * h * 0.6:
+            if best is None or w * h > best[2] * best[3]:
+                best = (x0 + x, y0 + y, w, h)
+    return best
+
+
+def handle_resume(items, rect, frame, tc, inp, tst):
+    """城鎮跳出「未完成的一局…要從那裡繼續嗎？」→ 按「繼續」（或照設定按「捨棄」）。有處理回傳 True"""
+    joined = " ".join(i["n"] for i in items)
+    if not any(norm(k) in joined for k in ("未完成的一局", "離開了一局", "從那裡繼續", "完成的一")):
+        return False
+    ox, oy = rect[0], rect[1]
+    H, W = frame.shape[:2]
+
+    def btn(word):
+        c = [i for i in items if match(i["text"], word) and len(i["n"]) <= 3
+             and H * 0.3 < i["cy"] - oy < H * 0.8]
+        return max(c, key=lambda i: i["cy"]) if c else None
+    go, drop = btn("繼續"), btn("捨棄")
+    if go is None and drop is None:
+        # 按鈕上的字常讀不到 → 放大視窗下半部再讀一次
+        body = [i for i in items if any(norm(k) in i["n"] for k in ("未完成的一局", "離開了一局", "完成的一"))]
+        ty = min(i["cy"] for i in body) - oy if body else H * 0.4
+        x0, x1 = int(W * 0.25), int(W * 0.75)
+        y0, y1 = int(max(0, ty)), int(min(H, ty + H * 0.3))
+        items = items + ocr(frame[y0:y1, x0:x1], ox + x0, oy + y0, scale=1.5, min_score=0.3)
+        go, drop = btn("繼續"), btn("捨棄")
+        if go is None and drop is None and body:
+            # 還是讀不到 → 照視窗的固定位置（標題下方、視窗右下角）
+            t = min(body, key=lambda i: i["cy"])
+            go = {"text": "繼續", "x": ox + W * 0.673 - 30, "y": t["cy"] + H * 0.176 - 12, "w": 60, "h": 24}
+            box = _blue_button(frame, int(W * 0.5), int(t["cy"] - oy + H * 0.08), int(W * 0.85),
+                               int(min(H, t["cy"] - oy + H * 0.3)))
+            if box:     # 用顏色找：「繼續」是視窗右下角的藍色按鈕
+                go = {"text": "繼續", "x": ox + box[0], "y": oy + box[1], "w": box[2], "h": box[3]}
+            else:
+                log("「未完成的一局」的按鈕找不到，改按它平常的位置")
+    if go is None and drop is not None:      # 「繼續」沒讀到：它在「捨棄」右邊一格
+        go = dict(drop, x=drop["x"] + W * 0.078, text="繼續")
+    if drop is None and go is not None:
+        drop = dict(go, x=go["x"] - W * 0.078, text="捨棄")
+    if go is None:
+        return False
+    n = GAME.get("resume_n", 0)
+    want = tc.get("resume", "continue") != "abandon" and n < int(tc.get("resume_max", 3) or 0)
+    MOVER.set(None, False)
+    time.sleep(random.uniform(0.5, 1.1))
+    if want:
+        GAME["resume_n"] = n + 1
+        log(f"城鎮跳出「未完成的一局」→ 按「繼續」（這一局第 {n + 1} 次繼續）")
+        inp.click_item(go, "繼續")
+        GAME["phase"], GAME["battle_seen"] = "battle", time.time()
+        GAME.update(ending_logged=False, batch_target=None, game_counted=False, hold_logged=False,
+                    chest_pick=None)
+    else:
+        if tc.get("resume", "continue") != "abandon":
+            log(f"這一局已經繼續 {n} 次還是打不完 → 按「捨棄」，重新開一場")
+        else:
+            log("城鎮跳出「未完成的一局」→ 按「捨棄」")
+        GAME["resume_n"] = 0
+        inp.click_item(drop, "捨棄")
+    tst["cooldown_until"] = time.time() + 2.5
+    tst["target"] = None
     return True
 
 
