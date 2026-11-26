@@ -6,7 +6,11 @@
 //
 // 程式端：POST /v1/check  {key, machine, app_ver, nonce}
 //   → {p: "<JSON 字串>", s: "<Ed25519 簽章 base64>"}，程式用公鑰驗證，回應無法偽造
-// 管理頁：/admin（輸入 ADMIN_PASSWORD 後可以停用序號、改到期日、寫備註）
+// 管理頁：/admin（輸入 ADMIN_PASSWORD 後可以停用序號、改到期日、寫備註、下載買家回報的紀錄檔）
+//
+// 問題回報：POST /v1/report（內容是一個 zip，裡面只有文字紀錄檔；資訊放在 x- 開頭的標頭）
+//   存在同一個 D1 資料庫的 reports 資料表（第一次有人回報時自動建立），最多留 300 筆／30 天
+//   想要有人回報時收到 Discord 通知：Secrets 多加一個 DISCORD_WEBHOOK（頻道的 Webhook 網址），不加也能用
 
 // 序號簽章的公鑰（跟程式裡 licensing.py 的 PUBLIC_KEY_HEX 一樣）
 const SERIAL_PUBLIC_KEY_HEX = "29b2500b132fb7ccf147ac3d464981c57e28a1ce2cec313fe53ce6c9ee4ea839";
@@ -28,11 +32,28 @@ const SCHEMA = `CREATE TABLE IF NOT EXISTS licenses (
   app_ver TEXT,
   checks INTEGER NOT NULL DEFAULT 0
 )`;
+const REPORT_SCHEMA = `CREATE TABLE IF NOT EXISTS reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_id TEXT NOT NULL DEFAULT '',
+  machine TEXT NOT NULL DEFAULT '',
+  app_ver TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  ip TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  data BLOB
+)`;
+const REPORT_MAX = 1900000;        // 一份回報最大幾 bytes（D1 一格最多 2MB）
+const REPORT_MAX_NOKEY = 400000;   // 沒有有效序號的人（例如還沒啟用就遇到問題）只能傳小的
+const REPORT_KEEP = 300;           // 最多留幾筆
+const REPORT_DAYS = 30;            // 留幾天
 let schemaReady = false;
 
 async function ensureSchema(env) {
   if (!schemaReady) {
     await env.DB.prepare(SCHEMA).run();
+    await env.DB.prepare(REPORT_SCHEMA).run();
     schemaReady = true;
   }
 }
@@ -136,6 +157,79 @@ async function handleCheck(req, env) {
   return reply("ok", "ok", end);
 }
 
+// ---------- 買家回報問題（上傳文字紀錄檔的 zip）----------
+async function handleReport(req, env, ctx) {
+  const h = (k) => req.headers.get(k) || "";
+  const declared = parseInt(h("content-length") || "0", 10);
+  if (declared > REPORT_MAX) return json({ error: "檔案太大" }, 413);
+  const buf = await req.arrayBuffer();
+  if (buf.byteLength < 22 || buf.byteLength > REPORT_MAX) return json({ error: "檔案大小不對" }, 413);
+  const head = new Uint8Array(buf, 0, 2);
+  if (head[0] !== 0x50 || head[1] !== 0x4b) return json({ error: "格式不對" }, 400);    // zip 開頭是 PK
+
+  const machine = h("x-machine").toUpperCase().replace(/[^0-9A-F]/g, "").slice(0, 16);
+  const info = await decodeSerial(h("x-key"));
+  const licensed = !!(info && info.machine === machine);
+  let note = "";
+  try { note = decodeURIComponent(h("x-note")); } catch { note = h("x-note"); }
+  note = note.slice(0, 500);
+  const kind = h("x-kind").replace(/[^a-z_]/g, "").slice(0, 20) || "manual";
+  const ver = h("x-ver").replace(/[^0-9A-Za-z._-]/g, "").slice(0, 20);
+  const ip = h("cf-connecting-ip");
+  const now = nowTW();
+  const hourAgo = new Date(Date.now() + TZ_OFFSET_MS - 3600000).toISOString().slice(0, 19).replace("T", " ");
+  const dayAgo = new Date(Date.now() + TZ_OFFSET_MS - DAY_MS).toISOString().slice(0, 19).replace("T", " ");
+
+  await ensureSchema(env);
+  // 限制次數：避免有人灌爆資料庫
+  if (licensed) {
+    const r = await env.DB.prepare(
+      `SELECT SUM(created_at > ?2) AS h, COUNT(*) AS d FROM reports WHERE key_id = ?1 AND created_at > ?3`
+    ).bind(info.keyId, hourAgo, dayAgo).first();
+    if ((r.h || 0) >= 6 || (r.d || 0) >= 20) return json({ error: "回報太頻繁了，請晚一點再試" }, 429);
+  } else {
+    if (buf.byteLength > REPORT_MAX_NOKEY) return json({ error: "還沒啟用序號時，回報的檔案不能太大" }, 413);
+    const r = await env.DB.prepare(
+      `SELECT SUM(ip = ?1) AS mine, COUNT(*) AS allc FROM reports WHERE key_id = '' AND created_at > ?2`
+    ).bind(ip, dayAgo).first();
+    if ((r.mine || 0) >= 3 || (r.allc || 0) >= 40) return json({ error: "回報太頻繁了，請晚一點再試" }, 429);
+  }
+  const ins = await env.DB.prepare(
+    `INSERT INTO reports (key_id, machine, app_ver, created_at, ip, kind, note, size, data)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+  ).bind(licensed ? info.keyId : "", machine, ver, now, ip, kind, note, buf.byteLength, buf).run();
+  const id = ins.meta && ins.meta.last_row_id;
+  // 只留最近 REPORT_KEEP 筆、REPORT_DAYS 天
+  const old = new Date(Date.now() + TZ_OFFSET_MS - REPORT_DAYS * DAY_MS).toISOString().slice(0, 19).replace("T", " ");
+  await env.DB.prepare(
+    `DELETE FROM reports WHERE created_at < ?1 OR id <= (SELECT MAX(id) FROM reports) - ?2`
+  ).bind(old, REPORT_KEEP).run();
+
+  if (env.DISCORD_WEBHOOK && ctx) ctx.waitUntil(notifyDiscord(env, { id, machine, ver, kind, note, now, licensed }, buf));
+  return json({ ok: true, id });
+}
+
+async function notifyDiscord(env, r, buf) {
+  try {
+    let who = "";
+    const row = await env.DB.prepare("SELECT note FROM licenses WHERE machine = ?1 ORDER BY last_seen DESC LIMIT 1")
+      .bind(r.machine).first();
+    if (row && row.note) who = `（${row.note}）`;
+    const mc = (r.machine.match(/..../g) || [r.machine]).join("-");
+    const kindName = { manual: "手動回報", update_fail: "更新失敗" }[r.kind] || r.kind;
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify({
+      content: `📩 回報 #${r.id}｜${kindName}｜v${r.ver || "?"}｜${mc}${who}${r.licensed ? "" : "｜沒有有效序號"}\n` +
+        (r.note ? "> " + r.note.replace(/\n/g, "\n> ").slice(0, 900) : "（沒有寫說明）"),
+      allowed_mentions: { parse: [] },
+    }));
+    form.append("files[0]", new Blob([buf], { type: "application/zip" }), `report_${r.id}_${mc}.zip`);
+    await fetch(env.DISCORD_WEBHOOK.trim(), { method: "POST", body: form });
+  } catch (e) {
+    // 通知失敗不影響回報本身（管理頁還是看得到）
+  }
+}
+
 // ---------- 管理頁 ----------
 function adminOk(req, env) {
   const a = req.headers.get("x-admin-password") || "";
@@ -163,6 +257,26 @@ async function handleAdminApi(req, env, path) {
     ).bind(String(b.key_id), b.revoked ? 1 : 0, endOv, String(b.note || "").slice(0, 200)).run();
     return json({ ok: true });
   }
+  if (path === "/admin/api/reports") {
+    const { results } = await env.DB.prepare(
+      `SELECT r.id, r.key_id, r.machine, r.app_ver, r.created_at, r.ip, r.kind, r.note, r.size,
+              (SELECT l.note FROM licenses l WHERE l.machine = r.machine ORDER BY l.last_seen DESC LIMIT 1) AS who
+       FROM reports r ORDER BY r.id DESC LIMIT 300`).all();
+    return json({ rows: results });
+  }
+  if (path === "/admin/api/report_get") {
+    const b = await req.json();
+    const row = await env.DB.prepare("SELECT data, machine FROM reports WHERE id = ?1").bind(Number(b.id)).first();
+    if (!row || !row.data) return json({ error: "找不到這筆回報" }, 404);
+    return new Response(new Uint8Array(row.data), {
+      headers: { "content-type": "application/zip", "cache-control": "no-store" },
+    });
+  }
+  if (path === "/admin/api/report_del") {
+    const b = await req.json();
+    await env.DB.prepare("DELETE FROM reports WHERE id = ?1").bind(Number(b.id)).run();
+    return json({ ok: true });
+  }
   return json({ error: "not found" }, 404);
 }
 
@@ -184,6 +298,11 @@ input[type=text],input[type=date]{padding:3px;font-size:14px}button{padding:4px 
   <div id="msg"></div>
   <table><thead><tr><th>機器碼</th><th>序號到期</th><th>改到期日</th><th>停用</th><th>備註</th><th>最後上線</th><th>IP</th><th>版本</th><th>次數</th><th></th></tr></thead>
   <tbody id="tb"></tbody></table>
+  <h3 style="margin-top:28px">問題回報 <button onclick="loadReports()">重新整理</button></h3>
+  <p style="color:#666">買家在程式按「回報問題」（或更新失敗時選擇回報）送來的文字紀錄檔。按「下載」會拿到一個 zip，
+  裡面有執行紀錄、更新紀錄、設定檔和「電腦資訊.txt」。最多留 300 筆、30 天。</p>
+  <table><thead><tr><th>#</th><th>時間</th><th>買家（序號備註）</th><th>機器碼</th><th>版本</th><th>類型</th><th>買家寫的說明</th><th>大小</th><th></th></tr></thead>
+  <tbody id="rb"></tbody></table>
 </div>
 <script>
 let PW = sessionStorage.getItem("pw") || "", ROWS = [], TODAY = "";
@@ -205,6 +324,38 @@ function show(j) {
   document.getElementById("main").style.display = "";
   document.getElementById("today").textContent = TODAY;
   draw();
+  loadReports();
+}
+const KIND = {manual: "手動回報", update_fail: "更新失敗"};
+async function loadReports() {
+  try {
+    const j = await api("/admin/api/reports");
+    document.getElementById("rb").innerHTML = j.rows.map(r => {
+      const mc = (r.machine.match(/..../g) || [r.machine]).join("-");
+      return '<tr data-id="' + r.id + '" data-mc="' + esc(mc) + '"><td>' + r.id + '</td><td>' + esc(r.created_at) + '</td>' +
+        '<td>' + esc(r.who || (r.key_id ? "" : "（沒有有效序號）")) + '</td><td class="mono">' + esc(mc) + '</td>' +
+        '<td>' + esc(r.app_ver) + '</td><td>' + esc(KIND[r.kind] || r.kind) + '</td>' +
+        '<td style="white-space:pre-wrap;max-width:420px">' + esc(r.note) + '</td><td>' + Math.round(r.size / 1024) + ' KB</td>' +
+        '<td><button onclick="getReport(this)">下載</button> <button onclick="delReport(this)">刪除</button></td></tr>';
+    }).join("") || '<tr><td colspan="9" style="color:#999">還沒有人回報</td></tr>';
+  } catch (e) { document.getElementById("msg").textContent = "讀取回報失敗：" + e.message; }
+}
+async function getReport(btn) {
+  const tr = btn.closest("tr");
+  const r = await fetch("/admin/api/report_get", {method: "POST",
+    headers: {"content-type": "application/json", "x-admin-password": PW}, body: JSON.stringify({id: Number(tr.dataset.id)})});
+  if (!r.ok) { alert("下載失敗"); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await r.blob());
+  a.download = "report_" + tr.dataset.id + "_" + tr.dataset.mc + ".zip";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+async function delReport(btn) {
+  const tr = btn.closest("tr");
+  if (!confirm("刪除回報 #" + tr.dataset.id + "？")) return;
+  try { await api("/admin/api/report_del", {id: Number(tr.dataset.id)}); tr.remove(); }
+  catch (e) { alert(e.message); }
 }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function draw() {
@@ -236,10 +387,11 @@ if (PW) login();
 </script></body></html>`;
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     try {
       if (url.pathname === "/v1/check" && req.method === "POST") return await handleCheck(req, env);
+      if (url.pathname === "/v1/report" && req.method === "POST") return await handleReport(req, env, ctx);
       if (url.pathname === "/admin") {
         return new Response(ADMIN_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
       }

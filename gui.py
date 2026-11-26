@@ -21,6 +21,7 @@ import updater
 # 沒有線上更新的版本：程式資料夾裡有 no_update.flag 這個檔案
 NO_UPDATE = os.path.exists(os.path.join(rb.BASE_DIR, "no_update.flag"))
 import licensing
+import support
 licensing.APP_VERSION = getattr(rb, "VERSION", "")
 
 APP_TITLE = "掛機小幫手"
@@ -249,6 +250,7 @@ class App:
         ttk.Button(srow, text="加入 Discord 社群", command=lambda: webbrowser.open(DISCORD_URL)).pack(
             side="right")
         ttk.Button(srow, text="今日報表", command=self.open_report).pack(side="right", padx=4)
+        ttk.Button(srow, text="回報問題", command=self.show_report).pack(side="right")
         self.stats_lbl = ttk.Label(srow, text=rb.stats_text(), foreground="#444")
         self.stats_lbl.pack(side="left", fill="x", expand=True)
         self.stats_next = 0
@@ -946,6 +948,83 @@ class App:
         os.makedirs(rb.LOG_DIR, exist_ok=True)
         self.open_path(rb.LOG_DIR)
 
+    # ---------------- 回報問題 ----------------
+    def show_report(self, kind="manual", preset=""):
+        """把文字紀錄檔傳給賣家（只有按了「送出」才會傳）"""
+        old = getattr(self, "report_win", None)
+        if old is not None and old.winfo_exists():
+            old.lift()
+            return
+        win = self.report_win = tk.Toplevel(self.root)
+        win.title("回報問題")
+        win.transient(self.root)
+        win.resizable(False, False)
+        fr = ttk.Frame(win, padding=14)
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="遇到問題時，把紀錄檔傳給賣家，比較快找到原因。", font=("", 10, "bold")).pack(anchor="w")
+        ttk.Label(fr, text=support.WHAT, justify="left", foreground="#444").pack(anchor="w", pady=(6, 8))
+        ttk.Label(fr, text="遇到什麼狀況？（選填，例如：打到第幾分鐘卡住、哪個按鈕沒反應）").pack(anchor="w")
+        txt = tk.Text(fr, width=58, height=5, wrap="word")
+        txt.pack(fill="x", pady=(2, 8))
+        if preset:
+            txt.insert("1.0", preset)
+        status = ttk.Label(fr, text="", foreground="#666")
+        status.pack(anchor="w")
+        bf = ttk.Frame(fr)
+        bf.pack(fill="x", pady=(8, 0))
+        b_send = ttk.Button(bf, text="送出")
+        b_send.pack(side="right")
+        ttk.Button(bf, text="取消", command=win.destroy).pack(side="right", padx=6)
+        box = {}
+
+        def work(note):
+            try:
+                box["r"] = support.report(rb.BASE_DIR, rb.LOG_DIR, rb.VERSION, note, kind, rb.CONFIG_PATH)
+            except Exception as e:
+                box["r"] = {"ok": False, "msg": f"打包失敗：{e!r}", "id": None, "path": None, "files": [], "size": 0}
+
+        def poll():                     # 介面只能在主執行緒改，所以用輪詢接結果
+            if "r" not in box:
+                self.root.after(150, poll)
+                return
+            r = box["r"]
+            if win.winfo_exists():
+                win.destroy()
+            if r["ok"]:
+                self._report_t = time.time()
+                self.add_log(f"已回報問題（編號 #{r['id']}，{len(r['files'])} 個檔案、{r['size'] // 1024} KB）")
+                messagebox.showinfo(APP_TITLE, f"已送出，回報編號 #{r['id']}。\n\n"
+                                               "跟賣家聯絡時講這個編號，賣家就找得到你的紀錄。")
+            elif r.get("path"):
+                self.add_log(f"回報沒有送出（{r['msg']}）→ 紀錄檔已打包在 {r['path']}")
+                messagebox.showwarning(APP_TITLE, f"沒有送出：{r['msg']}\n\n"
+                                                  "紀錄檔已經打包好放在 logs 資料夾（檔名是「回報_日期時間.zip」），"
+                                                  "請直接把這個檔案傳給賣家。\n\n按「確定」會打開那個資料夾。")
+                self.open_logs()
+            else:
+                self.add_log(f"回報沒有送出（{r['msg']}）")
+                messagebox.showwarning(APP_TITLE, f"沒有送出：{r['msg']}\n\n請直接把 logs 資料夾裡最新的 "
+                                                  "bot_*.log 和 update.log 傳給賣家。")
+
+        def do_send():
+            if time.time() - getattr(self, "_report_t", 0) < 60:
+                status.config(text="剛剛才回報過，請等一分鐘再送。", foreground="#c0392b")
+                return
+            note = txt.get("1.0", "end").strip()
+            b_send.config(state="disabled")
+            status.config(text="打包、傳送中…（最多 40 秒）", foreground="#666")
+            threading.Thread(target=work, args=(note,), daemon=True).start()
+            self.root.after(150, poll)
+
+        b_send.config(command=do_send)
+        win.update_idletasks()
+        try:
+            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
+            y = self.root.winfo_rooty() + 60
+            win.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
     # ---------------- 線上更新 ----------------
     def check_update(self, quiet):
         if NO_UPDATE:
@@ -1003,6 +1082,8 @@ class App:
                        "・有另一個掛機小幫手還開著\n\n"
                        "請把整個資料夾搬到桌面或 D:\\ 再試，或下載新版手動解壓覆蓋。\n"
                        "詳細記錄在 logs\\update.log")
+        if messagebox.askyesno(APP_TITLE, "要把更新紀錄回報給賣家嗎？\n\n賣家看得到是哪一步失敗，比較快幫你處理。"):
+            self.show_report(kind="update_fail", preset=f"更新沒有成功：現在是 v{rb.VERSION}，要更新到 v{to}")
 
     def ask_update(self, info, token):
         # 只列幾行重點，不貼整份更新紀錄
