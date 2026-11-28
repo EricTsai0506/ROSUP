@@ -118,7 +118,7 @@ def _new_mss():
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
 
 
-VERSION = "1.6.13"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
+VERSION = "1.6.14"   # 線上更新用：發新版時改這裡，GitHub 上的標籤要是 v1.0.0 這種格式
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "bot_config.json")
@@ -332,6 +332,8 @@ DEFAULT_CONFIG = {
         "mode": "festival",          # festival = 節慶主持人（原本的關卡）；expedition = 遠征隊長
         "stage": "普隆德拉原野",       # 遠征要刷的關卡
         "difficulty": "keep",          # 出發前的難度：keep 不調整、min 最簡單、max 最難
+        "field_mode": "keep",          # 出發前「模式」：keep 不調整、normal 正常、easy 簡單
+        "field_speed": 0,              # 出發前「速度」：0 不調整、1／2／3 = x1／x2／x3
         "boss_hold": {"斐揚洞穴": 820},  # 遠征關卡：計時到幾秒後停在原地（只在躲鐘時移動）
     },
     "chest": {
@@ -2392,9 +2394,10 @@ def slow_check(now):
     if len(marks) < 4 or GAME.get("slow_logged"):
         return
     d = [marks[i + 1][1] - marks[i][1] for i in range(3)]
-    if min(d) > 150:
+    sp = GAME.get("field_speed") or 1          # 出發前選了 x2／x3：遊戲時間本來就走得比較快
+    if min(d) > 120.0 / sp + 40:               # 遊戲時間 1 分鐘 = 60/倍速 秒，再加上選寶箱暫停的時間
         GAME["slow_logged"] = True
-        log(f"遊戲跑得很慢：遊戲時間 1 分鐘要花 {sum(d) / 3:.0f} 秒（平常大約 75 秒）。"
+        log(f"遊戲跑得很慢：遊戲時間 1 分鐘要花 {sum(d) / 3:.0f} 秒（平常大約 {60 // sp + 15} 秒）。"
             "常見原因：螢幕關閉或電腦進入省電、電腦被別的程式佔用、用遠端桌面連線後斷線。"
             "這段時間每一場會拖很久、也比較容易撞牆")
 
@@ -2505,6 +2508,7 @@ def report_game_end(cfg):
                "max_timer": mt, "cause": cause, "last_hp": list(hp) if hp else None,
                "hp_min_pct": GAME.get("hp_min_pct"), "char_lv": GAME.get("char_lv"),
                "slow": bool(GAME.get("slow_logged")), "bells": GAME.get("bell_count", 0),
+               "mode": GAME.get("field_mode"), "speed": GAME.get("field_speed"),
                "bosses": [dict(b) for b in GAME.get("boss_log", [])]}
         path = _rep.record(LOG_DIR, rec, cfg["move"].get("boss_times"))
         wb = _rep.worst_boss(rec)
@@ -2727,7 +2731,8 @@ def _bell_search(frame, ep, lc, world, now):
             "（畫面存在 logs 的 bell_missing_*.jpg）")
         save_image(frame, "bell_missing")
     # 鐘通常離角色 350～500 像素；正上方、正下方的會被上面的血條／下面的技能欄擋住 → 上下各走一段就看得到
-    t = (el - 1.2) % 7.5
+    sp = GAME.get("field_speed") or 1          # 選了 x2／x3：角色走得比較快，每一段走的時間照比例縮短
+    t = ((el - 1.2) * sp) % 7.5
     if t < 1.3:
         return ("move", (0.0, -1.0), 150.0)       # 往上
     if t < 3.9:
@@ -2847,7 +2852,8 @@ def bell_step(frame, lc, world, now, banner_t, hold_on, mvp_on=True):
         ep["found_logged"] = True
         where = ("上" if dy < -60 else "下" if dy > 60 else "") + ("左" if dx < -60 else "右" if dx > 60 else "")
         log(f"第 {ep['n']} 次躲鐘：看到鐘了（在{where or '旁邊'}，約 {dist:.0f} 像素）→ 走到鐘的正下方")
-    if dist > (max(55.0, ep["hold"] + 25.0) if ep["reached"] else 30.0):
+    sp = GAME.get("field_speed") or 1          # x2／x3 一步走得比較遠：「到了」的範圍放寬，才不會在目標旁邊來回
+    if dist > (max(55.0 * sp ** 0.5, ep["hold"] + 25.0) if ep["reached"] else min(30.0 * sp, 70.0)):
         if ep["reached"]:
             # 站好之後突然離目標很遠：先等 0.45 秒再確認一次（可能只是鏡頭位移算錯），真的被推開才走回去
             if ep["away_t"] is None:
@@ -3562,6 +3568,11 @@ def town_ocr(frame, rect, cfg, inp, tst):
     # 「升級」視窗 → 前往野外
     btn = next((i for i in items if match(i["text"], tc["field_button"])), None)
     if btn:
+        # 模式（正常／簡單）、速度（x1～x3）：照設定點，下一輪確認選到了再往下
+        if set_field_options(frame, items, rect, tc, inp, tst):
+            tst["cooldown_until"] = time.time() + 0.5
+            return "acted"
+        f_mode, f_speed = field_summary(field_options(frame, items, rect))
         # 難度視窗：先照設定調滑桿，下一輪再按前往野外
         if tc.get("difficulty", "keep") in ("min", "max") and \
                 time.time() - tst.get("diff_set_t", 0) > 20 and find_sliders(frame, items, ox, oy):
@@ -3574,8 +3585,10 @@ def town_ocr(frame, rect, cfg, inp, tst):
         GAME.update(max_timer=0, ending_logged=False, batch_target=None, game_counted=False,
                     maxlv_logged=False, hold_logged=False, bell_ep=None, bells_done=[], bell_count=0,
                     late_logged=False, focused=set(), focus_off=False, deity_clicks=0, deity_off_until=0,
-                    chest_pick=None, resume_n=0)
-        log("進入戰鬥")
+                    chest_pick=None, resume_n=0, field_mode=f_mode, field_speed=f_speed)
+        log("進入戰鬥" + (f"（{'、'.join(x for x in (f_mode and '模式 ' + f_mode, f_speed and f'速度 x{f_speed}') if x)}）"
+                        if f_mode or f_speed else ""))
+        tst.pop("opt", None)
         return "acted"
 
     # 節慶活動視窗 → 開始遊戲（先用按鈕外觀找，再用文字，最後用固定位置）
@@ -4655,6 +4668,94 @@ def _blue_button(frame, x0, y0, x1, y1):
             if best is None or w * h > best[2] * best[3]:
                 best = (x0 + x, y0 + y, w, h)
     return best
+
+
+FIELD_MODES = {"normal": "正常", "easy": "簡單"}
+
+
+def field_options(frame, items, rect):
+    """「升級」視窗（按「前往野外」之前）的選項：模式（正常／簡單）、速度（x1／x2／x3）。
+    回傳 {"mode": {"normal": (x, y, 有沒有選到), "easy": …}, "speed": {1: …, 2: …, 3: …}}
+    （x, y 是畫面座標；那一列的標題沒讀到就不會有那個 key，例如舊版的視窗、遠征的難度視窗）。
+    按鈕上的字有時候讀不到（實測「簡單」就讀不到）→ 用同一列讀到的按鈕、或「前往野外」的位置推算"""
+    ox, oy = rect[0], rect[1]
+    go = next((i for i in items if norm("前往野外") in i["n"]), None)
+    if go is None:
+        return {}
+    cancel = next((i for i in items if i["n"] == norm("取消") and abs(i["cy"] - go["cy"]) < go["h"]
+                   and i["cx"] < go["cx"]), None)
+    k = min(1.6, max(0.7, (go["cx"] - cancel["cx"]) / 114.0)) if cancel else 1.0   # 視窗比預設大／小多少
+
+    def selected(cx, cy):
+        # 選到的按鈕是淡藍色（藍比紅多 40 左右），沒選到的接近白色（多 10 左右）
+        x0, x1 = int(cx - ox - 22 * k), int(cx - ox + 22 * k)
+        y0, y1 = int(cy - oy - 12 * k), int(cy - oy + 12 * k)
+        roi = frame[max(0, y0):y1, max(0, x0):x1].reshape(-1, 3).astype(np.int32)
+        roi = roi[roi.max(axis=1) > 170]
+        return len(roi) > 20 and float((roi[:, 0] - roi[:, 2]).mean()) > 25
+
+    out = {}
+    for key, word, names, gaps, base in (
+            ("mode", "模式", {"normal": ("正常",), "easy": ("簡單", "簡单", "间单")}, {"normal": 0, "easy": 66}, -34),
+            ("speed", "速度", {1: ("x1", "xl", "xi"), 2: ("x2",), 3: ("x3",)}, {1: 0, 2: 53, 3: 106}, -68)):
+        lab = next((i for i in items if i["n"] == norm(word) and i["cx"] < go["cx"] - 250 * k
+                    and i["cy"] < go["cy"] - go["h"]), None)
+        if lab is None:
+            continue
+        row = [i for i in items if abs(i["cy"] - lab["cy"]) < 14 * k and i["cx"] > lab["cx"] + 150 * k]
+        found = {}
+        for name, alts in names.items():
+            alts_n = [norm(a) for a in alts]
+            it = next((i for i in row if i["n"].lower().replace("×", "x") in alts_n), None)
+            if it is not None:
+                found[name] = it["cx"]
+        if found:                      # 讀到其中一顆 → 其他的照固定間距推
+            ref = next(iter(found))
+            x0 = found[ref] - gaps[ref] * k
+        else:                          # 一顆都沒讀到 → 照「前往野外」的位置推
+            x0 = go["cx"] + base * k
+        out[key] = {}
+        for name in names:
+            x = found.get(name, x0 + gaps[name] * k)
+            out[key][name] = (x, lab["cy"], selected(x, lab["cy"]))
+    return out
+
+
+def set_field_options(frame, items, rect, tc, inp, tst):
+    """照設定點「模式」「速度」。有點了東西回傳 True（下一輪重新讀畫面確認有沒有選到）"""
+    want = {"mode": tc.get("field_mode", "keep"), "speed": int(tc.get("field_speed", 0) or 0)}
+    if want["mode"] not in FIELD_MODES and want["speed"] not in (1, 2, 3):
+        return False
+    opts = field_options(frame, items, rect)
+    st = tst.get("opt")
+    if st is None or time.time() - st["t"] > 25:
+        st = tst["opt"] = {"t": time.time(), "mode": 0, "speed": 0}
+    for key, title in (("mode", "模式"), ("speed", "速度")):
+        w = want[key]
+        if key not in opts or w not in opts[key]:
+            continue
+        x, y, on = opts[key][w]
+        if on:
+            continue
+        name = FIELD_MODES[w] if key == "mode" else f"x{w}"
+        if st[key] >= 3:
+            if st[key] == 3:
+                st[key] = 4
+                log(f"出發前的「{title}」點了 3 次還是沒選到「{name}」→ 照目前的選項出發")
+            continue
+        st[key] += 1
+        time.sleep(random.uniform(0.3, 0.7))
+        log(f"出發前的選項：{title} → {name}")
+        inp.click_item({"text": name, "x": x - 10, "y": y - 7, "w": 20, "h": 14}, name)
+        return True
+    return False
+
+
+def field_summary(opts):
+    """目前選到的模式和速度（給紀錄和報表用）：回傳 (模式名稱或 None, 速度 1～3 或 None)"""
+    mode = next((FIELD_MODES[m] for m, (_, _, on) in opts.get("mode", {}).items() if on), None)
+    speed = next((n for n, (_, _, on) in opts.get("speed", {}).items() if on), None)
+    return mode, speed
 
 
 def handle_resume(items, rect, frame, tc, inp, tst):

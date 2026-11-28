@@ -212,6 +212,9 @@ class App:
             c["town"]["mode"] = "festival"
         c["town"]["difficulty"] = next((k for k, v in self.DIFF_CHOICES.items() if v == self.v_diff.get()),
                                        "keep")
+        c["town"]["field_mode"] = next((k for k, v in self.FMODE_CHOICES.items() if v == self.v_fmode.get()),
+                                       "keep")
+        c["town"]["field_speed"] = next((k for k, v in self.FSPEED_CHOICES.items() if v == self.v_fspeed.get()), 0)
         for k in ("afk", "login", "charselect"):
             c.setdefault(k, dict(rb.DEFAULT_CONFIG[k]))["enabled"] = self.v_login.get()
         c["charselect"]["slot"] = int(self.v_slot.get())
@@ -361,6 +364,22 @@ class App:
                      state="readonly", width=26).grid(row=1, column=1, sticky="w", padx=6, pady=2)
         ttk.Label(sf, text="遠征會走到遠征隊長、選關、出發；難度在按「前往野外」前調整",
                   foreground="#666").grid(row=2, column=0, columnspan=2, sticky="w")
+        # 出發前「升級」視窗的模式、速度（遊戲 11/28 新增）
+        self.FMODE_CHOICES = {"keep": "不調整", "normal": "正常", "easy": "簡單"}
+        self.FSPEED_CHOICES = {0: "不調整", 1: "x1", 2: "x2", 3: "x3"}
+        self.v_fmode = tk.StringVar(value=self.FMODE_CHOICES["keep"])
+        self.v_fspeed = tk.StringVar(value=self.FSPEED_CHOICES[0])
+        of = ttk.Frame(sf)
+        of.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        sf.columnconfigure(1, weight=1)          # 多出來的寬度給第二欄，上面兩個下拉選單才不會被推到右邊
+        ttk.Label(of, text="模式").pack(side="left")
+        ttk.Combobox(of, textvariable=self.v_fmode, values=list(self.FMODE_CHOICES.values()),
+                     state="readonly", width=7).pack(side="left", padx=(6, 14))
+        ttk.Label(of, text="速度").pack(side="left")
+        ttk.Combobox(of, textvariable=self.v_fspeed, values=list(self.FSPEED_CHOICES.values()),
+                     state="readonly", width=7).pack(side="left", padx=6)
+        ttk.Label(of, text="出發前視窗的「模式」「速度」；x2、x3 反應時間變短，比較容易漏躲",
+                  foreground="#666").pack(side="left", padx=6)
         keep = {lg, uf, mf, ef, af, sf, dodge_cb, rsf, pff}   # 精簡介面時基本頁只留這幾區（加上頭目閃避）
         rf = ttk.Frame(f1)
         rf.grid(row=len(checks) + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -584,6 +603,11 @@ class App:
         else:
             self.v_stage.set(self.STAGE_CHOICES[0])
         self.v_diff.set(self.DIFF_CHOICES.get(c["town"].get("difficulty", "keep"), self.DIFF_CHOICES["keep"]))
+        self.v_fmode.set(self.FMODE_CHOICES.get(c["town"].get("field_mode", "keep"), self.FMODE_CHOICES["keep"]))
+        try:
+            self.v_fspeed.set(self.FSPEED_CHOICES.get(int(c["town"].get("field_speed", 0) or 0), self.FSPEED_CHOICES[0]))
+        except (TypeError, ValueError):
+            self.v_fspeed.set(self.FSPEED_CHOICES[0])
         self.v_login.set(c.get("login", {}).get("enabled", True))
         self.v_slot.set(int(c.get("charselect", {}).get("slot", 1)))
         self.v_snap.set(c.get("debug_snapshots", True))
